@@ -76,6 +76,7 @@ def cmd_build(args: argparse.Namespace) -> None:
 
     # Sort sources by priority descending
     sorted_sources = sorted(sources.values(), key=lambda s: s.priority, reverse=True)
+    built_apps = set()
     total_compiled_bundles = 0
 
     for src in sorted_sources:
@@ -157,6 +158,7 @@ def cmd_build(args: argparse.Namespace) -> None:
                     })
 
             # Register in manifest
+            is_default = (pkg not in built_apps)
             manifest_gen.register_bundle(
                 package_name=pkg,
                 app_name=app_info.app_name,
@@ -166,8 +168,9 @@ def cmd_build(args: argparse.Namespace) -> None:
                 bundle_file=output_bundle_apk,
                 description=src.description,
                 patches=active_patches_meta,
-                is_default=is_canonical
+                is_default=is_default
             )
+            built_apps.add(pkg)
 
         # Mark source as built in ledger
         ledger.mark_built(src.id, entry.sha256)
