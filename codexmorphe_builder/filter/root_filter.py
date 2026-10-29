@@ -1,7 +1,10 @@
 import re
 from typing import List, Tuple, Dict
 
-# 9 Categories of Patches that are strictly redundant or harmful under LSPosed in-memory hooking
+# The 6 strictly redundant or harmful patch categories under in-memory LSPosed hooking.
+# NOTE: PairIP license/installer bypasses, in-app update blockers, Play Store update blockers,
+# code transparency checks, and certificate pinning overrides are DELIBERATELY RETAINED
+# to ensure manual sideloading of supported APK versions works flawlessly without crashes or popups.
 CATEGORIZED_REDUNDANT_PATTERNS: Dict[str, List[str]] = {
     "1. Custom Branding & Launcher Icons": [
         r".*custombranding.*",
@@ -11,20 +14,7 @@ CATEGORIZED_REDUNDANT_PATTERNS: Dict[str, List[str]] = {
         r".*pickappicon.*",
         r".*themedicon.*",
     ],
-    "2. Signature, Cert & Integrity Bypasses": [
-        r".*spoof.*(?:signature|cert|hash).*",
-        r".*overridecertificatepinning.*",
-        r".*signaturecompatibility.*",
-        r".*signaturedetection.*",
-        r".*certseed.*",
-        r".*bypasscodetransparency.*",
-        r".*bypassintegritycheck.*",
-        r".*disablesignaturecheck.*",
-        r".*aapadsecuritybypass.*",
-        r".*messengersignature.*",
-        r".*picturemushroom/signature.*",
-    ],
-    "3. GmsCore / MicroG Redirection": [
+    "2. GmsCore / MicroG Redirection": [
         r".*gmscore.*",
         r".*microg.*",
         r".*accountcredentialsinvalidtext.*",
@@ -32,36 +22,23 @@ CATEGORIZED_REDUNDANT_PATTERNS: Dict[str, List[str]] = {
         r".*gms.*linkhandling.*",
         r".*playservice.*versioncheck.*",
     ],
-    "4. Package Renaming, Cloning & Coexistence": [
+    "3. Package Renaming, Cloning & Coexistence": [
         r".*clone(?:app)?patch.*",
         r".*changepackage.*",
         r".*installnextto.*",
         r".*renamesharedpermissions.*",
     ],
-    "5. Update Blocking & Version Code Spoofing": [
-        r".*disableplaystoreupdates.*",
-        r".*disablelayoutupdates.*",
-        r".*disableautoupdate.*",
-        r".*blockupdatescreen.*",
-        r".*hideupdatescreen.*",
-        r".*hideupdatepopup.*",
-        r".*truecloudupdate.*",
-    ],
-    "6. AndroidManifest & SharedUserId Shims": [
+    "4. AndroidManifest Static Repackaging Shims": [
         r".*removeshareduserid.*",
         r".*fixduplicatepermissions.*",
         r".*exportallactivities.*",
     ],
-    "7. PairIP Anti-Tamper & Native Kill Gates": [
-        r".*pairip.*(?:antitamper|signature|vmgate|licensecheck|removal|bypass).*",
-        r".*nativekillgate.*",
-    ],
-    "8. Content / File Provider Shims": [
+    "5. Cloned Content / File Provider Shims": [
         r".*fixcontentprovider.*",
         r".*fileproviderpatch.*",
         r".*fixpreferenceicon.*",
     ],
-    "9. Developer / Debugging Mode Shims": [
+    "6. Developer / Debugging Mode Clutter": [
         r".*enable(?:android)?debugging.*",
         r".*debugmode.*",
         r".*debugcomment.*",
@@ -72,7 +49,7 @@ CATEGORIZED_REDUNDANT_PATTERNS: Dict[str, List[str]] = {
 
 def is_patch_redundant(patch_class: str) -> Tuple[bool, str]:
     """
-    Check if a given patch class is redundant for an in-memory LSPosed engine.
+    Check if a given patch class is strictly redundant for an in-memory LSPosed engine.
     Returns (is_redundant, category_and_pattern).
     """
     normalized = patch_class.lower().replace("/", ".").replace("$", "")
