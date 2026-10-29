@@ -69,7 +69,6 @@ jobs:
         with:
           path: |
             .cache/
-            dist/
           key: codexmorphe-cache-${{ hashFiles('sources/*.json') }}-${{ github.run_id }}
           restore-keys: |
             codexmorphe-cache-${{ hashFiles('sources/*.json') }}-
@@ -90,6 +89,9 @@ jobs:
           RELEASE_REPO: ${{ github.repository }}
           RELEASE_TAG: "bundles"
         run: |
+          # Ensure dist/ workspace is clean of any legacy or unflavored artifacts
+          rm -rf dist/
+          mkdir -p dist/
           BUILD_FLAGS="--changed-only"
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
             echo "Trigger is push or force_rebuild: compiling all bundles with latest builder..."
@@ -112,8 +114,8 @@ jobs:
               --notes "Automated rolling release of per-app patch bundles and bundle-manifest.json. Updated every 6 hours."
           fi
 
-          # 2. Upload compiled bundles with in-place upsert (--clobber)
-          for apk in dist/*.apk; do
+          # 2. Upload compiled author-flavored bundles with in-place upsert (--clobber)
+          for apk in dist/*-*-bundle.apk; do
             if [ -f "$apk" ]; then
               echo "Upserting $apk..."
               gh release upload bundles "$apk" --clobber
