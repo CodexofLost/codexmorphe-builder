@@ -1,0 +1,11 @@
+{
+  "id": "okish",
+  "name": "Okish Morphe Patches",
+  "type": "github_release",
+  "repository": "byehi98/okish-morphe-patches",
+  "asset_pattern": ".*\\.mpp$",
+  "include_prerelease": true,
+  "priority": 70,
+  "enabled": true,
+  "description": "Game patches and utilities including Alto's Adventure, Alto's Odyssey, and indie games."
+}

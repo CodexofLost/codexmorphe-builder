@@ -1,0 +1,11 @@
+{
+  "id": "devanced",
+  "name": "De-Vanced",
+  "type": "github_release",
+  "repository": "RookieEnough/De-Vanced",
+  "asset_pattern": ".*\\.mpp$",
+  "include_prerelease": false,
+  "priority": 80,
+  "enabled": true,
+  "description": "Patches for Amazon Music, Disney+, Cricbuzz, Bandcamp, and miscellaneous apps."
+}

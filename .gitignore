@@ -1,0 +1,30 @@
+# Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Local Build Artifacts & Caches
+.cache/
+dist/
+build/
+*.egg-info/
+out/
+tmp/
+
+# Downloaded MPP & Bundles
+*.mpp
+*.apk
+*.dex
+
+# Environment & Secret files
+.env
+.env.local
+local.properties
+*.keystore
+!*.example.keystore
+
+# System & OS Files
+.DS_Store
+Thumbs.db
+.nomedia

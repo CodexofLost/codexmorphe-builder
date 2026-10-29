@@ -1,0 +1,11 @@
+{
+  "id": "rushiranpise",
+  "name": "Rushiranpise Morphe Patches",
+  "type": "github_release",
+  "repository": "rushiranpise/morphe-patches",
+  "asset_pattern": ".*\\.mpp$",
+  "include_prerelease": false,
+  "priority": 75,
+  "enabled": true,
+  "description": "Comprehensive community patchset covering Telegram, Messenger, Duolingo, Strava, and 20+ apps."
+}

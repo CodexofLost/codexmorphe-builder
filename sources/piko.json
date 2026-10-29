@@ -1,0 +1,11 @@
+{
+  "id": "piko",
+  "name": "Piko",
+  "type": "github_release",
+  "repository": "crimera/piko",
+  "asset_pattern": ".*\\.mpp$",
+  "include_prerelease": false,
+  "priority": 85,
+  "enabled": true,
+  "description": "Ad-blocking and feed customization patches for Twitter/X and Instagram."
+}

@@ -1,0 +1,11 @@
+{
+  "id": "hushgram",
+  "name": "HushGram",
+  "type": "github_release",
+  "repository": "SysAdminDoc/HushGram",
+  "asset_pattern": ".*\\.mpp$",
+  "include_prerelease": false,
+  "priority": 90,
+  "enabled": true,
+  "description": "Privacy-focused Instagram patches: ghost mode, hide typing status, disable voice calls."
+}

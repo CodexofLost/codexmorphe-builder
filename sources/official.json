@@ -1,0 +1,11 @@
+{
+  "id": "official",
+  "name": "Official Morphe Patches",
+  "type": "github_release",
+  "repository": "MorpheApp/morphe-patches",
+  "asset_pattern": ".*\\.mpp$",
+  "include_prerelease": false,
+  "priority": 100,
+  "enabled": true,
+  "description": "Canonical upstream Morphe patches for YouTube, YouTube Music, Reddit, and core apps."
+}
