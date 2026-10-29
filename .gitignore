@@ -1,30 +1,101 @@
-# Bytecode & Caches
+# ==============================================================================
+# Python & Runtime Environments
+# ==============================================================================
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
-
-# Local Build Artifacts & Caches
-.cache/
-dist/
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ==============================================================================
+# Morphe & Android Binaries / Packages
+# ==============================================================================
+*.mpp
+*.mpe
+*.apk
+*.ap_
+*.aab
+*.dex
+*.jar
+*.aar
+
+# ==============================================================================
+# Local Build Artifacts & Caches
+# ==============================================================================
+.cache/
 out/
 tmp/
+*.tmp
 
-# Downloaded MPP & Bundles
-*.mpp
-*.apk
-*.dex
-
-# Environment & Secret files
+# ==============================================================================
+# Environment, Credentials & Local Config
+# ==============================================================================
 .env
-.env.local
+.env.*
+!.env.example
 local.properties
 *.keystore
+*.jks
 !*.example.keystore
 
-# System & OS Files
+# ==============================================================================
+# Archives & Milestone Backups (Shared Storage)
+# ==============================================================================
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# ==============================================================================
+# IDEs, Editors & OS Files
+# ==============================================================================
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+*~
 .DS_Store
 Thumbs.db
 .nomedia
+.directory
+
+# ==============================================================================
+# Agent Tools, Analysis Graphs & Scratch
+# ==============================================================================
+graphify-out/
+repomix-output.*
+scratch/
+.system_generated/
+*.log
