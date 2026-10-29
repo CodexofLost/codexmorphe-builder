@@ -9,7 +9,9 @@ class TestRootFilter(unittest.TestCase):
             "Lapp/morphe/patches/youtube/misc/fix/signature/SpoofSignaturePatchKt;",
             "Lapp/morphe/patches/reddit/misc/clone/CloneAppPatchKt;",
             "Lapp/morphe/patches/all/misc/pairip/PairipBypassSignaturePatchKt;",
-            "Lapp/morphe/patches/youtube/misc/update/DisablePlayStoreUpdatesPatchKt;"
+            "Lapp/morphe/patches/youtube/misc/update/DisablePlayStoreUpdatesPatchKt;",
+            "Lapp/morphe/patches/youtube/layout/branding/CustomBrandingPatchKt;",
+            "Lapp/morphe/patches/reddit/layout/branding/name/CustomBrandingNamePatchKt;"
         ]
         for p in redundant_samples:
             is_red, reason = is_patch_redundant(p)

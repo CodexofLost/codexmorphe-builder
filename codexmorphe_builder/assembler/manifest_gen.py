@@ -7,19 +7,31 @@ from .apk_packager import compute_sha256
 
 
 @dataclass
+class PatchCatalogItem:
+    id: str
+    name: str
+    description: str
+    default: bool
+    key: str
+
+
+@dataclass
 class ProviderBundleInfo:
     source_id: str
-    name: str
+    author: str
     version: str
     bundle_file: str
+    download_url: str
     description: str
     sha256: str
     size_bytes: int
+    patches: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
 class AppCatalogEntry:
     package_name: str
+    app_name: str
     default_provider: str
     providers: Dict[str, ProviderBundleInfo] = field(default_factory=dict)
 
@@ -32,11 +44,14 @@ class BundleManifestGenerator:
     def register_bundle(
         self,
         package_name: str,
+        app_name: str,
         source_id: str,
-        source_name: str,
+        author: str,
         version: str,
         bundle_file: Path,
         description: str,
+        patches: List[Dict[str, Any]],
+        download_url: str = "",
         is_default: bool = False
     ) -> None:
         sha256 = compute_sha256(bundle_file)
@@ -45,6 +60,7 @@ class BundleManifestGenerator:
         if package_name not in self.catalog:
             self.catalog[package_name] = AppCatalogEntry(
                 package_name=package_name,
+                app_name=app_name,
                 default_provider=source_id
             )
 
@@ -53,12 +69,14 @@ class BundleManifestGenerator:
 
         self.catalog[package_name].providers[source_id] = ProviderBundleInfo(
             source_id=source_id,
-            name=source_name,
+            author=author,
             version=version,
             bundle_file=bundle_file.name,
+            download_url=download_url or f"https://github.com/releases/download/{version}/{bundle_file.name}",
             description=description,
             sha256=sha256,
-            size_bytes=size_bytes
+            size_bytes=size_bytes,
+            patches=patches
         )
 
     def write_manifest(self, filename: str = "bundle-manifest.json") -> Path:
@@ -71,7 +89,8 @@ class BundleManifestGenerator:
 
         for pkg, app_entry in self.catalog.items():
             data["apps"][pkg] = {
-                "default": app_entry.default_provider,
+                "app_name": app_entry.app_name,
+                "default_provider": app_entry.default_provider,
                 "providers": {
                     src_id: asdict(prov) for src_id, prov in app_entry.providers.items()
                 }

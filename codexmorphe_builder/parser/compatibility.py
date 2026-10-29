@@ -21,12 +21,50 @@ KNOWN_NAMESPACE_MAPPINGS = {
     "spotify": "com.spotify.music"
 }
 
+KNOWN_APP_NAMES = {
+    "com.google.android.youtube": "YouTube",
+    "com.google.android.apps.youtube.music": "YouTube Music",
+    "com.reddit.frontpage": "Reddit",
+    "com.instagram.android": "Instagram",
+    "com.twitter.android": "Twitter / X",
+    "org.telegram.messenger": "Telegram",
+    "com.amazon.mp3": "Amazon Music",
+    "com.altosadventure": "Alto's Adventure",
+    "com.altosodyssey": "Alto's Odyssey",
+    "com.duolingo": "Duolingo",
+    "com.strava": "Strava",
+    "com.zhiliaoapp.musically": "TikTok",
+    "com.spotify.music": "Spotify"
+}
+
+
+@dataclass
+class PatchInfo:
+    id: str
+    name: str
+    description: str
+    default: bool
+    key: str
+    patch_class: str
+
+
+def clean_patch_name(cls_name: str) -> str:
+    base = cls_name.split("/")[-1].replace("PatchKt", "").replace("Patch", "")
+    name = re.sub(r"([A-Z])", r" \1", base).strip()
+    return name or "Custom Patch"
+
+
+def make_patch_key(name: str) -> str:
+    return "morphe_" + re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
 
 @dataclass
 class DiscoveredApp:
     package_name: str
+    app_name: str
     app_tag: str
     patch_classes: List[str] = field(default_factory=list)
+    patches: List[PatchInfo] = field(default_factory=list)
 
 
 def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
@@ -45,7 +83,6 @@ def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
         clean = cls.strip("L;").replace("\\", "/")
         parts = clean.split("/")
 
-        # Extract app tag (e.g. 'youtube', 'reddit', 'instagram', 'twitter', 'amznmusic')
         try:
             p_idx = parts.index("patches")
             if p_idx + 1 < len(parts):
@@ -54,9 +91,31 @@ def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
                     continue
 
                 pkg = KNOWN_NAMESPACE_MAPPINGS.get(app_tag, f"com.{app_tag}.app")
+                app_display_name = KNOWN_APP_NAMES.get(pkg, app_tag.title())
+
                 if pkg not in discovered:
-                    discovered[pkg] = DiscoveredApp(package_name=pkg, app_tag=app_tag)
+                    discovered[pkg] = DiscoveredApp(
+                        package_name=pkg,
+                        app_name=app_display_name,
+                        app_tag=app_tag
+                    )
+
+                patch_name = clean_patch_name(clean)
+                patch_key = make_patch_key(patch_name)
+                patch_id = re.sub(r"[^a-z0-9]+", "_", patch_name.lower()).strip("_")
+                desc = f"Enables options to customize and enhance {patch_name.lower()}."
+
+                patch_info = PatchInfo(
+                    id=patch_id,
+                    name=patch_name,
+                    description=desc,
+                    default=True,
+                    key=patch_key,
+                    patch_class=clean
+                )
+
                 discovered[pkg].patch_classes.append(clean)
+                discovered[pkg].patches.append(patch_info)
         except ValueError:
             pass
 

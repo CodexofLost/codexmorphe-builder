@@ -25,7 +25,11 @@ REDUNDANT_PATCH_PATTERNS = [
     r".*pairip.*licensecheck.*",
     # Play store updates blocker (unneeded because DexKit adapts across versions)
     r".*disableplaystoreupdates.*",
-    r".*disableautoupdate.*"
+    r".*disableautoupdate.*",
+    # Custom branding (replaces app launcher icon and label on disk; redundant under LSPosed)
+    r".*custombranding.*",
+    r".*branding.*name.*",
+    r".*branding.*icon.*"
 ]
 
 

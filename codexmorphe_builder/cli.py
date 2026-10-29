@@ -128,14 +128,28 @@ def cmd_build(args: argparse.Namespace) -> None:
                 print(f"    ★ Emitted canonical default: {canonical_apk.name}")
                 built_apps.add(pkg)
 
+            # Prepare patch metadata catalog for active patches
+            active_patches_meta = []
+            for p in app_info.patches:
+                if p.patch_class in retained_patches:
+                    active_patches_meta.append({
+                        "id": p.id,
+                        "name": p.name,
+                        "description": p.description,
+                        "default": p.default,
+                        "key": p.key
+                    })
+
             # Register in manifest
             manifest_gen.register_bundle(
                 package_name=pkg,
+                app_name=app_info.app_name,
                 source_id=src.id,
-                source_name=src.name,
+                author=src.name,
                 version=entry.release_tag,
                 bundle_file=output_bundle_apk,
                 description=src.description,
+                patches=active_patches_meta,
                 is_default=is_canonical
             )
 
