@@ -64,10 +64,46 @@ JAVA_BIN = find_tool("java")
 ZIPALIGN_BIN = find_tool("zipalign")
 APKSIGNER_BIN = find_tool("apksigner")
 
+
+def find_android_jar() -> Path | None:
+    """
+    Search for android.jar in platforms/ directories under known SDK roots.
+    Prefers the highest platform version available (e.g. android-37 > android-35).
+    """
+    home = Path.home()
+    sdk_roots = []
+    if "ANDROID_HOME" in os.environ:
+        sdk_roots.append(Path(os.environ["ANDROID_HOME"]))
+    if "ANDROID_SDK_ROOT" in os.environ:
+        sdk_roots.append(Path(os.environ["ANDROID_SDK_ROOT"]))
+    sdk_roots.extend([
+        home / "android-sdk",
+        home / "Android" / "Sdk",
+        Path("/usr/lib/android-sdk")
+    ])
+
+    candidates = []
+    for root in sdk_roots:
+        platforms_dir = root / "platforms"
+        if platforms_dir.exists():
+            for p in platforms_dir.iterdir():
+                jar = p / "android.jar"
+                if jar.exists():
+                    candidates.append(jar)
+
+    if candidates:
+        return sorted(candidates, key=lambda p: p.parent.name, reverse=True)[0]
+    return None
+
+
+ANDROID_JAR = find_android_jar()
+
+
 def get_toolchain_status() -> dict:
     return {
         "d8": str(D8_BIN) if D8_BIN else "MISSING",
         "aapt2": str(AAPT2_BIN) if AAPT2_BIN else "MISSING",
+        "android_jar": str(ANDROID_JAR) if ANDROID_JAR else "MISSING",
         "java": str(JAVA_BIN) if JAVA_BIN else "MISSING",
         "zipalign": str(ZIPALIGN_BIN) if ZIPALIGN_BIN else "MISSING",
         "apksigner": str(APKSIGNER_BIN) if APKSIGNER_BIN else "MISSING",

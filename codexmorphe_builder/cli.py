@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .assembler.aapt_compiler import compile_resources
 from .assembler.apk_packager import assemble_bundle_apk
 from .assembler.d8_merger import merge_dex_files
 from .assembler.manifest_gen import BundleManifestGenerator
@@ -120,14 +121,23 @@ def cmd_build(args: argparse.Namespace) -> None:
             extracted_mpe = archive.extract_extensions_for_app(app_info.app_tag, ext_dir)
             print(f"    Extracted {len(extracted_mpe)} extension .mpe file(s)")
 
-            # Step 2: Package bundle APK as standard MultiDex
             if not extracted_mpe:
                 print("    [WARN] No .mpe extensions matched for this app tag.")
                 continue
 
+            # Step 2: Extract & compile Android XML/image resources (drawables, layouts, strings)
+            res_dir = app_tmp_dir / "res"
+            archive.extract_resources_for_app(app_info.app_tag, res_dir)
+            resources_apk = compile_resources(res_dir, pkg, app_tmp_dir / "res_out")
+            if resources_apk:
+                print(f"    ✓ Compiled resources container: {resources_apk.name} ({resources_apk.stat().st_size // 1024} KB)")
+            else:
+                print("    [INFO] No binary resources compiled for this target.")
+
+            # Step 3: Package bundle APK as standard MultiDex + Compiled Resources
             bundle_filename = f"{pkg}-{src.id}-bundle.apk"
             output_bundle_apk = OUTPUT_DIR / bundle_filename
-            assemble_bundle_apk(extracted_mpe, None, output_bundle_apk)
+            assemble_bundle_apk(extracted_mpe, resources_apk, output_bundle_apk)
             total_compiled_bundles += 1
             print(f"    ✓ Emitted MultiDex bundle: {bundle_filename} ({output_bundle_apk.stat().st_size // 1024} KB)")
 

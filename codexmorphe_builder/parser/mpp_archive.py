@@ -59,6 +59,73 @@ class MppArchive:
                     extracted.append(out_path)
         return extracted
 
+    def extract_resources_for_app(self, app_tag: str, dest_res_dir: Path) -> Path:
+        """
+        Extract XML layouts, vector/raster drawables, localized strings, and raw assets
+        matching this application's inheritance chain into a standard Android res/ directory.
+        """
+        import re
+
+        dest_res_dir.mkdir(parents=True, exist_ok=True)
+        allowed_targets = {"shared", app_tag, f"shared-{app_tag}"}
+        if app_tag in ("youtube", "music"):
+            allowed_targets.add("sponsorblock")
+            allowed_targets.add("shared-youtube")
+
+        valid_exts = {".xml", ".png", ".webp", ".jpg", ".jpeg", ".json", ".svg"}
+        known_apps = {"youtube", "music", "reddit", "instagram", "twitter", "waze", "twitch"}
+
+        with zipfile.ZipFile(self.path, "r") as z:
+            for name in z.namelist():
+                # 1. Skip non-resource files and excluded branding
+                if name.endswith("/") or name.startswith("META-INF/") or name.startswith("patches/"):
+                    continue
+                if name.startswith("custom-branding/") or "branding" in name.lower() and ("icon" in name.lower() or "logo" in name.lower()):
+                    continue
+                if Path(name).suffix.lower() not in valid_exts:
+                    continue
+
+                # 2. Check if file is isolated under a foreign app root (e.g. twitter/ when app_tag is instagram)
+                first_part = name.split("/")[0].lower()
+                if first_part in known_apps and first_part != app_tag:
+                    continue
+
+                # 3. Handle localized string tables (addresources/values-<lang>/<target>/strings.xml)
+                if name.startswith("addresources/"):
+                    parts = name.split("/")
+                    if len(parts) >= 4 and parts[3] == "strings.xml":
+                        val_qualifier = parts[1]
+                        target = parts[2].lower()
+                        if target in allowed_targets:
+                            val_dir = dest_res_dir / val_qualifier
+                            val_dir.mkdir(parents=True, exist_ok=True)
+                            raw_xml = z.read(name).decode("utf-8", errors="ignore")
+                            # Sanitize unescaped % tokens for AAPT2 format validation
+                            fixed_xml = re.sub(
+                                r'<string\s+([^>]*?)>([^<]*?%[^<]*?)</string>',
+                                lambda m: f'<string {m.group(1)} formatted="false">{m.group(2)}</string>' if 'formatted=' not in m.group(1) else m.group(0),
+                                raw_xml
+                            )
+                            out_file = val_dir / f"strings_{target}.xml"
+                            out_file.write_text(fixed_xml, encoding="utf-8")
+                    continue
+
+                # 4. Handle standard Android resource types (drawables, layouts, raw, anim, color)
+                for res_type in ("drawable", "layout", "raw", "anim", "color"):
+                    marker = f"/{res_type}/"
+                    idx = name.find(marker)
+                    if idx != -1:
+                        filename = name[idx + len(marker):]
+                        if filename and not filename.endswith("/"):
+                            target_type_dir = dest_res_dir / res_type
+                            target_type_dir.mkdir(parents=True, exist_ok=True)
+                            out_target_file = target_type_dir / Path(filename).name
+                            with open(out_target_file, "wb") as out:
+                                out.write(z.read(name))
+                        break
+
+        return dest_res_dir
+
     @staticmethod
     def _extract_dex_classes(dex_bytes: bytes) -> List[str]:
         if len(dex_bytes) < 0x70 or not dex_bytes[:4].startswith(b"dex\n"):
