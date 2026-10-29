@@ -42,21 +42,36 @@ class MppArchive:
 
     def extract_extensions_for_app(self, app_tag: str, dest_dir: Path) -> List[Path]:
         """
-        Extract extensions matching the inheritance chain for an app.
-        e.g. For 'youtube': 'shared.mpe', 'shared-youtube.mpe', 'youtube.mpe'.
-        For 'reddit': 'shared.mpe', 'reddit.mpe'.
+        Extract extensions following official Morphe specifications:
+        1. Universal Shared Containers: 'shared.mpe', 'extension.mpe', 'shared-extension.mpe', 'shared-gmscore.mpe'.
+        2. Single-Extension Repositories: If an archive contains only 1 extension, it serves all apps in the bundle.
+        3. Multi-App Domain Matching: Matches <app_tag>.mpe, shared-<app_tag>.mpe, or domain tags.
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
         extracted = []
+
+        shared_stems = {"shared", "shared-extension", "shared-gmscore", "extension"}
+        non_shared_exts = [f for f in self.extension_files if Path(f).stem not in shared_stems]
+
         with zipfile.ZipFile(self.path, "r") as z:
             for ext in self.extension_files:
                 ext_name = Path(ext).stem
-                # Check inheritance matching (supports 'shared', 'extension', and app-specific tags)
-                if ext_name in ("shared", "extension", "shared-extension", app_tag, f"shared-{app_tag}"):
+
+                is_shared_base = ext_name in shared_stems
+                is_sole_app_ext = len(non_shared_exts) == 1 and len(self.extension_files) == 1
+                is_app_match = (
+                    ext_name == app_tag
+                    or ext_name == f"shared-{app_tag}"
+                    or ext_name.endswith(f"-{app_tag}")
+                    or (app_tag in ext_name and len(app_tag) > 3)
+                )
+
+                if is_shared_base or is_sole_app_ext or is_app_match:
                     out_path = dest_dir / f"{ext_name}.dex"
                     with open(out_path, "wb") as out:
                         out.write(z.read(ext))
                     extracted.append(out_path)
+
         return extracted
 
     def extract_resources_for_app(self, app_tag: str, dest_res_dir: Path) -> Path:
