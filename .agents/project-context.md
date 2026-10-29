@@ -1,7 +1,7 @@
 ---
-context_version: 1.0.2
-synced_commit: "b9e4bedd19cf7c4c9ace6880fd03d1c250ad27dd"
-synced_at: "2026-10-29T19:05:15Z"
+context_version: 1.0.3
+synced_commit: "a51628a46f1ff1fa9da211fe99a5e79ccf7b5c74"
+synced_at: "2026-10-29T19:17:17Z"
 ---
 
 # Project Context: codexmorphe-builder
