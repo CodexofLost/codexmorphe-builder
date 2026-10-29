@@ -51,8 +51,8 @@ class MppArchive:
         with zipfile.ZipFile(self.path, "r") as z:
             for ext in self.extension_files:
                 ext_name = Path(ext).stem
-                # Check inheritance matching
-                if ext_name == "shared" or ext_name == app_tag or ext_name == f"shared-{app_tag}":
+                # Check inheritance matching (supports 'shared', 'extension', and app-specific tags)
+                if ext_name in ("shared", "extension", "shared-extension", app_tag, f"shared-{app_tag}"):
                     out_path = dest_dir / f"{ext_name}.dex"
                     with open(out_path, "wb") as out:
                         out.write(z.read(ext))

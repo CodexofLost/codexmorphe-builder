@@ -76,7 +76,6 @@ def cmd_build(args: argparse.Namespace) -> None:
 
     # Sort sources by priority descending
     sorted_sources = sorted(sources.values(), key=lambda s: s.priority, reverse=True)
-    built_apps = set()
     total_compiled_bundles = 0
 
     for src in sorted_sources:
@@ -110,6 +109,10 @@ def cmd_build(args: argparse.Namespace) -> None:
             retained_patches, dropped = filter_redundant_patches(app_info.patch_classes)
             print(f"    Patches: {len(retained_patches)} active ({len(dropped)} non-root redundant filtered)")
 
+            if not retained_patches:
+                print("    [SKIP] 0 active patches retained after redundancy filtering.")
+                continue
+
             # Workspace for this app
             app_tmp_dir = BUILD_TMP_DIR / f"{pkg}_{src.id}"
             if app_tmp_dir.exists():
@@ -140,14 +143,6 @@ def cmd_build(args: argparse.Namespace) -> None:
             assemble_bundle_apk(extracted_mpe, resources_apk, output_bundle_apk)
             total_compiled_bundles += 1
             print(f"    ✓ Emitted MultiDex bundle: {bundle_filename} ({output_bundle_apk.stat().st_size // 1024} KB)")
-
-            # If this is the highest priority source for this app, also emit canonical bundle
-            is_canonical = pkg not in built_apps
-            if is_canonical:
-                canonical_apk = OUTPUT_DIR / f"{pkg}-bundle.apk"
-                shutil.copy2(output_bundle_apk, canonical_apk)
-                print(f"    ★ Emitted canonical default: {canonical_apk.name}")
-                built_apps.add(pkg)
 
             # Prepare patch metadata catalog for active patches
             active_patches_meta = []
