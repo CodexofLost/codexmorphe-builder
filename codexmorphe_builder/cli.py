@@ -27,9 +27,10 @@ def cmd_list(args: argparse.Namespace) -> None:
         status = "ENABLED" if src.enabled else "DISABLED"
         entry = ledger.get(src_id)
         cached_info = f"Cached ({entry.release_tag})" if (entry and Path(entry.file_path).exists()) else "Not Cached"
+        build_status = "Built" if (entry and entry.last_built_sha256 == entry.sha256) else "Pending Build"
         print(f"[{status}] {src.name} ({src.id})")
         print(f"  Repo:     {src.repository or src.direct_url or src.local_path}")
-        print(f"  Priority: {src.priority} | Status: {cached_info}")
+        print(f"  Priority: {src.priority} | Cache: {cached_info} | Build: {build_status}")
         if src.description:
             print(f"  Info:     {src.description}")
         print()
@@ -59,6 +60,9 @@ def cmd_build(args: argparse.Namespace) -> None:
     ledger = CacheLedger(LEDGER_FILE)
     manifest_gen = BundleManifestGenerator(OUTPUT_DIR)
 
+    # Load existing manifest so incremental builds retain unchanged providers
+    manifest_gen.load_existing()
+
     # Check toolchain
     status = get_toolchain_status()
     if status["d8"] == "MISSING":
@@ -72,6 +76,7 @@ def cmd_build(args: argparse.Namespace) -> None:
     # Sort sources by priority descending
     sorted_sources = sorted(sources.values(), key=lambda s: s.priority, reverse=True)
     built_apps = set()
+    total_compiled_bundles = 0
 
     for src in sorted_sources:
         if args.source and src.id != args.source:
@@ -80,6 +85,11 @@ def cmd_build(args: argparse.Namespace) -> None:
         entry = ledger.get(src.id)
         if not entry or not Path(entry.file_path).exists():
             print(f"[SKIP] Source '{src.id}' has no cached .mpp file. Run 'fetch' first.")
+            continue
+
+        # In delta mode, check if source .mpp has changed since last compilation
+        if args.changed_only and ledger.is_build_up_to_date(src.id):
+            print(f"\n[UP-TO-DATE] Source: {src.name} (SHA256 matches compiled build, skipping)")
             continue
 
         mpp_path = Path(entry.file_path)
@@ -118,6 +128,7 @@ def cmd_build(args: argparse.Namespace) -> None:
             bundle_filename = f"{pkg}-{src.id}-bundle.apk"
             output_bundle_apk = OUTPUT_DIR / bundle_filename
             assemble_bundle_apk(extracted_mpe, None, output_bundle_apk)
+            total_compiled_bundles += 1
             print(f"    ✓ Emitted MultiDex bundle: {bundle_filename} ({output_bundle_apk.stat().st_size // 1024} KB)")
 
             # If this is the highest priority source for this app, also emit canonical bundle
@@ -153,9 +164,12 @@ def cmd_build(args: argparse.Namespace) -> None:
                 is_default=is_canonical
             )
 
+        # Mark source as built in ledger
+        ledger.mark_built(src.id, entry.sha256)
+
     # Write final manifest
     manifest_file = manifest_gen.write_manifest()
-    print(f"\n✓ Published bundle manifest: {manifest_file.resolve()}")
+    print(f"\n✓ Published bundle manifest: {manifest_file.resolve()} (Newly compiled: {total_compiled_bundles} bundle(s))")
     print("=" * 70)
 
 
@@ -192,6 +206,7 @@ def main() -> None:
     # build
     build_parser = subparsers.add_parser("build", help="Build per-app bundles from cached .mpp archives")
     build_parser.add_argument("--all", action="store_true", help="Build all discovered applications")
+    build_parser.add_argument("--changed-only", action="store_true", help="Only build sources that have updated since last compilation (Approach C)")
     build_parser.add_argument("--app", type=str, help="Specific application package name to build")
     build_parser.add_argument("--source", type=str, help="Specific source ID to build from")
 

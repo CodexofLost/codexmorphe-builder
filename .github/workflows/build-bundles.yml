@@ -1,0 +1,111 @@
+name: Build & Publish Bundles (Rolling Release)
+
+on:
+  schedule:
+    # Run daily at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild all bundles (ignore cache ledger)"
+        required: false
+        type: boolean
+        default: false
+      source:
+        description: "Specific source ID to build (optional, e.g. official)"
+        required: false
+        type: string
+        default: ""
+  push:
+    branches:
+      - main
+    paths:
+      - "sources/**"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Install Android SDK Build-Tools (d8, aapt2)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aapt zipalign
+          # Install d8 via Google Android SDK commandline tools
+          echo "y" | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0"
+          echo "${ANDROID_HOME}/build-tools/34.0.0" >> $GITHUB_PATH
+
+      - name: Restore Cache Ledger & Downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/
+            dist/
+          key: codexmorphe-cache-${{ hashFiles('sources/*.json') }}-${{ github.run_id }}
+          restore-keys: |
+            codexmorphe-cache-${{ hashFiles('sources/*.json') }}-
+            codexmorphe-cache-
+
+      - name: Fetch Upstream Releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SOURCE_FLAG=""
+          if [ -n "${{ github.event.inputs.source }}" ]; then
+            SOURCE_FLAG="--source ${{ github.event.inputs.source }}"
+          fi
+          python3 -m codexmorphe_builder fetch $SOURCE_FLAG
+
+      - name: Compile Per-App Bundles (Delta Build)
+        run: |
+          BUILD_FLAGS="--changed-only"
+          if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
+            BUILD_FLAGS="--all"
+          fi
+          if [ -n "${{ github.event.inputs.source }}" ]; then
+            BUILD_FLAGS="$BUILD_FLAGS --source ${{ github.event.inputs.source }}"
+          fi
+          python3 -m codexmorphe_builder build $BUILD_FLAGS
+
+      - name: Publish to Rolling 'bundles' Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 1. Ensure canonical 'bundles' release tag exists
+          if ! gh release view bundles >/dev/null 2>&1; then
+            echo "Creating initial 'bundles' rolling release tag..."
+            gh release create bundles \
+              --title "CodexMorphe Active Bundles" \
+              --notes "Automated rolling release of per-app patch bundles and bundle-manifest.json. Updated continuously."
+          fi
+
+          # 2. Upload compiled bundles with in-place upsert (--clobber)
+          for apk in dist/*.apk; do
+            if [ -f "$apk" ]; then
+              echo "Upserting $apk..."
+              gh release upload bundles "$apk" --clobber
+            fi
+          done
+
+          # 3. Upload updated manifest catalog
+          if [ -f "dist/bundle-manifest.json" ]; then
+            echo "Upserting dist/bundle-manifest.json..."
+            gh release upload bundles dist/bundle-manifest.json --clobber
+          fi
+          echo "✓ Rolling release update complete."

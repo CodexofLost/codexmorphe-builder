@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from ..config import RELEASE_REPO, RELEASE_TAG
 from .apk_packager import compute_sha256
 
 
@@ -41,6 +42,28 @@ class BundleManifestGenerator:
         self.output_dir = output_dir
         self.catalog: Dict[str, AppCatalogEntry] = {}
 
+    def load_existing(self, filename: str = "bundle-manifest.json") -> None:
+        """
+        Load an existing manifest from disk so incremental builds can preserve unchanged providers.
+        """
+        manifest_path = self.output_dir / filename
+        if not manifest_path.exists():
+            return
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for pkg, app_data in data.get("apps", {}).items():
+                    entry = AppCatalogEntry(
+                        package_name=pkg,
+                        app_name=app_data.get("app_name", pkg),
+                        default_provider=app_data.get("default_provider", "")
+                    )
+                    for src_id, prov_data in app_data.get("providers", {}).items():
+                        entry.providers[src_id] = ProviderBundleInfo(**prov_data)
+                    self.catalog[pkg] = entry
+        except Exception as e:
+            print(f"[WARN] Failed to load existing manifest: {e}")
+
     def register_bundle(
         self,
         package_name: str,
@@ -64,15 +87,18 @@ class BundleManifestGenerator:
                 default_provider=source_id
             )
 
-        if is_default:
+        if is_default or not self.catalog[package_name].default_provider:
             self.catalog[package_name].default_provider = source_id
+
+        # Approach C: Use canonical permanent download URL under rolling 'bundles' release
+        canonical_url = download_url or f"https://github.com/{RELEASE_REPO}/releases/download/{RELEASE_TAG}/{bundle_file.name}"
 
         self.catalog[package_name].providers[source_id] = ProviderBundleInfo(
             source_id=source_id,
             author=author,
             version=version,
             bundle_file=bundle_file.name,
-            download_url=download_url or f"https://github.com/releases/download/{version}/{bundle_file.name}",
+            download_url=canonical_url,
             description=description,
             sha256=sha256,
             size_bytes=size_bytes,

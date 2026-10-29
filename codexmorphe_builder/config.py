@@ -12,6 +12,10 @@ BUILD_TMP_DIR = CACHE_DIR / "tmp"
 OUTPUT_DIR = PROJECT_ROOT / "dist"
 LEDGER_FILE = CACHE_DIR / "build-ledger.json"
 
+# Release Settings (Approach C: Rolling Release)
+RELEASE_REPO = os.environ.get("RELEASE_REPO", "CodexMorphe/codexmorphe-builder")
+RELEASE_TAG = os.environ.get("RELEASE_TAG", "bundles")
+
 # Ensure essential directories exist
 for directory in (SOURCES_DIR, CACHE_DIR, MPP_CACHE_DIR, BUILD_TMP_DIR, OUTPUT_DIR):
     directory.mkdir(parents=True, exist_ok=True)
