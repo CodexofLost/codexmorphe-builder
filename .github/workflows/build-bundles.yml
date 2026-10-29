@@ -2,8 +2,8 @@ name: Build & Publish Bundles (Rolling Release)
 
 on:
   schedule:
-    # Run daily at 03:00 UTC
-    - cron: "0 3 * * *"
+    # Run every 6 hours to fetch new .mpp releases
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -21,6 +21,8 @@ on:
       - main
     paths:
       - "sources/**"
+      - "codexmorphe_builder/**"
+      - ".github/workflows/**"
 
 permissions:
   contents: write
@@ -43,15 +45,21 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
-      - name: Install Android SDK Build-Tools (d8, aapt2)
+      - name: Set up Android SDK Build-Tools (d8, aapt2)
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq aapt zipalign
-          # Install d8 via Google Android SDK commandline tools
-          echo "y" | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0"
-          echo "${ANDROID_HOME}/build-tools/34.0.0" >> $GITHUB_PATH
+          # Android SDK build-tools 34.0.0 is pre-installed on ubuntu-latest
+          BUILD_TOOLS_DIR="${ANDROID_HOME}/build-tools/34.0.0"
+          if [ ! -d "$BUILD_TOOLS_DIR" ]; then
+            echo "Installing build-tools 34.0.0 via sdkmanager..."
+            yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0"
+          fi
+          echo "$BUILD_TOOLS_DIR" >> $GITHUB_PATH
 
-      - name: Restore Cache Ledger & Downloads
+      - name: Run Unit Tests
+        run: |
+          python3 -m unittest discover tests -v
+
+      - name: Restore Cache Ledger & MPP Archives
         uses: actions/cache@v4
         with:
           path: |
@@ -73,6 +81,9 @@ jobs:
           python3 -m codexmorphe_builder fetch $SOURCE_FLAG
 
       - name: Compile Per-App Bundles (Delta Build)
+        env:
+          RELEASE_REPO: ${{ github.repository }}
+          RELEASE_TAG: "bundles"
         run: |
           BUILD_FLAGS="--changed-only"
           if [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
@@ -92,7 +103,7 @@ jobs:
             echo "Creating initial 'bundles' rolling release tag..."
             gh release create bundles \
               --title "CodexMorphe Active Bundles" \
-              --notes "Automated rolling release of per-app patch bundles and bundle-manifest.json. Updated continuously."
+              --notes "Automated rolling release of per-app patch bundles and bundle-manifest.json. Updated every 6 hours."
           fi
 
           # 2. Upload compiled bundles with in-place upsert (--clobber)
