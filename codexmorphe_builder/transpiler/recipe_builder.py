@@ -380,8 +380,13 @@ def classify_action_from_patch(patch_bytes: bytes) -> Tuple[str, Optional[Any], 
     has_create = "onCreate" in all_text or "attachBaseContext" in all_text
     has_branch = "if-eqz" in all_text or "if-nez" in all_text
 
-    m_inv = INVOKE_STATIC_RE.search(all_text)
-    ext_call = m_inv.group(1).lstrip("L").rstrip(";") if m_inv else None
+    m_inv = re.search(
+        r"(?:Lapp/[a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)|(?:invoke-static[^\n]*\s*([a-zA-Z0-9_/$]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*))",
+        all_text
+    )
+    ext_call = m_inv.group(1) if (m_inv and m_inv.group(1)) else (m_inv.group(0) if m_inv else None)
+    if ext_call:
+        ext_call = ext_call.lstrip("L").rstrip(";")
 
     # 1. Lifecycle hook: onCreate / attachBaseContext -> METHOD_AFTER
     if has_super and has_create:
@@ -395,16 +400,16 @@ def classify_action_from_patch(patch_bytes: bytes) -> Tuple[str, Optional[Any], 
     if ext_call and any(k in all_text for k in ("initialize", "hook", "Extension", "watch")):
         return "METHOD_REPLACE", None, ext_call
 
-    # 4. Constant replace
-    if "return-void" in all_text:
+    # 4. Strict constant replace ONLY if explicit return constant is present
+    if "return-void" in all_text and not ext_call:
         return "CONSTANT_REPLACE", "void", None
-    if "const/4" in all_text and "0x0" in all_text:
+    if "const/4" in all_text and "0x0" in all_text and not ext_call:
         return "CONSTANT_REPLACE", False, None
-    if "const/4" in all_text and "0x1" in all_text:
+    if "const/4" in all_text and "0x1" in all_text and not ext_call:
         return "CONSTANT_REPLACE", True, None
 
-    # Default to CONSTANT_REPLACE false (safe suppression) or METHOD_REPLACE
-    return "CONSTANT_REPLACE", False, None
+    # Never default to CONSTANT_REPLACE false! Return None to indicate no actionable hook
+    return "UNKNOWN", None, ext_call
 
 
 def generate_hook_recipe_json(
@@ -429,72 +434,82 @@ def generate_hook_recipe_json(
         with zipfile.ZipFile(archive.path, "r") as z:
             names = z.namelist()
 
-            # Find matching patch directories
-            prefix = f"app/morphe/patches/{app_tag}/"
-            alt_prefix = f"app/crimera/patches/{app_tag}/"
-            app_files = [n for n in names if (n.startswith(prefix) or n.startswith(alt_prefix)) and n.endswith(".class") and "$" not in n]
+            patch_classes = [
+                n for n in names
+                if n.endswith(".class") and "$" not in n and ("PatchKt" in n or n.endswith("Patch.class"))
+                and (f"/{app_tag}/" in n or "/shared/" in n or "/all/" in n or app_tag in n)
+            ]
+            fp_file_map = {n.split("/")[-1]: n for n in names if n.endswith("Fingerprint.class") and "$" not in n}
 
-            # Also include shared patches (like GoogleApiActivityOnCreateFingerprint)
-            shared_files = [n for n in names if ("patches/shared/" in n or "patches/all/" in n) and n.endswith(".class") and "$" not in n]
+            for pf in patch_classes:
+                try:
+                    p_data = z.read(pf)
+                    p_strings, _, _ = parse_jvm_class(p_data)
+                    patch_name = next((s for s in p_strings if 3 < len(s) < 40 and not s.startswith("L") and not s.startswith("$") and " " in s), "")
 
-            # Group by patch directory
-            patch_dirs: Dict[str, List[str]] = {}
-            for f in app_files + shared_files:
-                d = str(Path(f).parent)
-                patch_dirs.setdefault(d, []).append(f)
+                    fp_refs = set(re.findall(rb'[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint', p_data))
+                    ext_calls_raw = set(re.findall(rb'(?:Lapp/[a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', p_data))
+                    ext_calls = [e.decode("utf-8", errors="ignore").lstrip("L").rstrip(";") for e in ext_calls_raw]
 
-            for d, files in patch_dirs.items():
-                patch_file = next((f for f in files if f.endswith("PatchKt.class")), None)
-                fp_files = [f for f in files if f.endswith("Fingerprint.class")]
+                    for fp_raw in fp_refs:
+                        fp_cls = fp_raw.decode("utf-8", errors="ignore")
+                        fp_name = fp_cls.split("/")[-1].replace("Fingerprint", "")
+                        hook_id = re.sub(r"[^a-z0-9]+", "_", fp_name.lower()).strip("_")
+                        if hook_id in seen_hook_ids:
+                            continue
 
-                action_type = "CONSTANT_REPLACE"
-                constant_val: Any = False
-                ext_call: Optional[str] = None
-                patch_name = ""
+                        fp_file = fp_file_map.get(fp_cls.split("/")[-1] + ".class")
+                        if not fp_file:
+                            continue
 
-                if patch_file:
-                    try:
-                        p_data = z.read(patch_file)
-                        action_type, constant_val, ext_call = classify_action_from_patch(p_data)
-                        p_strings, _, _ = parse_jvm_class(p_data)
-                        # Extract patch display name
-                        patch_name = next((s for s in p_strings if 3 < len(s) < 40 and not s.startswith("L") and not s.startswith("$") and " " in s), "")
-                    except Exception:
-                        pass
-
-                for fp_file in fp_files:
-                    fp_name = Path(fp_file).stem.replace("Fingerprint", "")
-                    hook_id = re.sub(r"[^a-z0-9]+", "_", fp_name.lower()).strip("_")
-                    if hook_id in seen_hook_ids:
-                        continue
-
-                    try:
                         fp_data = z.read(fp_file)
                         fp_def = extract_fingerprint_def(fp_file, fp_data)
                         if not fp_def:
                             continue
 
-                        # Special case: GoogleApiActivity is a lifecycle hook -> METHOD_AFTER
+                        # Require discriminator: never emit overbroad queries that match random methods
+                        if not fp_def.get("method_name") and not fp_def.get("declaring_class") and not fp_def.get("declaring_class_ends_with"):
+                            continue
+
+                        # Match to best extension call by token overlap
+                        best_ext = None
+                        if ext_calls:
+                            words = [w for w in re.split(r'[^a-z0-9]', re.sub(r'([a-z])([A-Z])', r'\1 \2', fp_name).lower()) if len(w) > 3]
+                            for ext in ext_calls:
+                                mtd = ext.split("->")[1].split("(")[0].lower()
+                                if any(w in mtd for w in words) or mtd in fp_name.lower() or fp_name.lower() in mtd:
+                                    best_ext = ext
+                                    break
+                            if not best_ext and len(ext_calls) <= 2:
+                                best_ext = ext_calls[0]
+
+                        # Only emit if an extension call was resolved or if GoogleApiActivity lifecycle hook
                         if "GoogleApiActivity" in fp_def.get("declaring_class", ""):
-                            action_type = "METHOD_AFTER"
-                            if not ext_call:
-                                ext_call = f"app.morphe.extension.{app_tag}.settings.YouTubeActivityHook->initialize(Landroid/app/Activity;)V"
+                            best_ext = f"app.morphe.extension.{app_tag}.settings.YouTubeActivityHook->initialize(Landroid/app/Activity;)V"
+
+                        if not best_ext:
+                            continue
+
+                        action = "METHOD_AFTER"
+                        if best_ext.endswith(")Z"):
+                            action = "EARLY_RETURN_SUPPRESSOR"
+                        elif best_ext.endswith(")V"):
+                            action = "METHOD_AFTER"
+                        else:
+                            action = "RETURN_TRANSFORM"
 
                         hook_recipe: Dict[str, Any] = {
                             "id": hook_id,
                             "name": patch_name or fp_name,
-                            "action": action_type,
-                            "fingerprint": fp_def
+                            "action": action,
+                            "fingerprint": fp_def,
+                            "extension_call": best_ext
                         }
-                        if constant_val is not None:
-                            hook_recipe["constant_val"] = constant_val
-                        if ext_call:
-                            hook_recipe["extension_call"] = ext_call
 
                         hooks.append(hook_recipe)
                         seen_hook_ids.add(hook_id)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
     manifest = {
         "version": 1,

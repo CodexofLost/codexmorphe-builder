@@ -114,17 +114,44 @@ jobs:
               --notes "Automated rolling release of per-app patch bundles and bundle-manifest.json. Updated every 6 hours."
           fi
 
-          # 2. Upload compiled author-flavored bundles with in-place upsert (--clobber)
+          # Resilient asset upload helper with retry and conflict deletion
+          upload_asset() {
+            local file="$1"
+            local name
+            name="$(basename "$file")"
+            for attempt in 1 2 3; do
+              if gh release upload bundles "$file" --clobber 2>/dev/null; then
+                return 0
+              fi
+              echo "Retrying $name (attempt $attempt)..."
+              gh release delete-asset bundles "$name" -y 2>/dev/null || true
+              sleep 1
+              if gh release upload bundles "$file" 2>/dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "Warning: Could not upload $name after 3 attempts."
+            return 0
+          }
+
+          # 2. Upload manifest catalog first so client always has immediate access
+          if [ -f "dist/bundle-manifest.json" ]; then
+            echo "Initial upsert of dist/bundle-manifest.json..."
+            upload_asset "dist/bundle-manifest.json"
+          fi
+
+          # 3. Upload compiled author-flavored bundles with in-place upsert
           for apk in dist/*-*-bundle.apk; do
             if [ -f "$apk" ]; then
               echo "Upserting $apk..."
-              gh release upload bundles "$apk" --clobber
+              upload_asset "$apk"
             fi
           done
 
-          # 3. Upload updated manifest catalog
+          # 4. Upload updated manifest catalog again to ensure latest hashes and timestamps
           if [ -f "dist/bundle-manifest.json" ]; then
-            echo "Upserting dist/bundle-manifest.json..."
-            gh release upload bundles dist/bundle-manifest.json --clobber
+            echo "Final upsert of dist/bundle-manifest.json..."
+            upload_asset "dist/bundle-manifest.json"
           fi
           echo "✓ Rolling release update complete."
