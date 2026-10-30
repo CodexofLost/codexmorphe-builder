@@ -140,7 +140,13 @@ def cmd_build(args: argparse.Namespace) -> None:
                 print("    [INFO] No binary resources compiled for this target.")
 
             # Step 3: Package bundle APK as standard MultiDex + Compiled Resources + Dynamic Hook Recipes
-            hooks_json_str = generate_hook_recipe_json(pkg, app_info, archive=archive, extracted_mpe=extracted_mpe)
+            hooks_json_str = generate_hook_recipe_json(
+                pkg,
+                app_info,
+                archive=archive,
+                extracted_mpe=extracted_mpe,
+                retained_patches=retained_patches
+            )
             bundle_filename = f"{pkg}-{src.id}-bundle.apk"
             output_bundle_apk = OUTPUT_DIR / bundle_filename
             assemble_bundle_apk(extracted_mpe, resources_apk, output_bundle_apk, hooks_data=hooks_json_str)

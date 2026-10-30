@@ -1,7 +1,7 @@
 ---
-context_version: 1.0.4
-synced_commit: dfa2410
-synced_at: "2026-10-30T14:35:00Z"
+context_version: 1.0.5
+synced_commit: HEAD
+synced_at: "2026-10-30T15:10:00Z"
 ---
 
 # Project Context: codexmorphe-builder
@@ -16,7 +16,7 @@ synced_at: "2026-10-30T14:35:00Z"
 | **Environment & Config** | `codexmorphe_builder/config.py` (resolves toolchain paths and defaults) |
 | **Core Stack** | Standard Library (`zipfile`, `json`, `urllib`, `subprocess`), Python `argparse` |
 | **Security & Auth** | `GITHUB_TOKEN` for CI release fetching; Ed25519 / Android V2 APK signing |
-| **Primary Commands** | `Fetch: python3 -m codexmorphe_builder fetch` \| `Build: python3 -m codexmorphe_builder build` \| `Test: pytest` |
+| **Primary Commands** | `Fetch: python3 -m codexmorphe_builder fetch` \| `Build: python3 -m codexmorphe_builder build` \| `Test: python3 -m unittest discover tests` |
 
 ## 2. Component Ownership & Architecture Map
 
@@ -28,8 +28,8 @@ synced_at: "2026-10-30T14:35:00Z"
 | **MPP Archive Parser** | `codexmorphe_builder/parser/mpp_archive.py` | Inspects `.mpp` ZIP container: extracts DEX, `.mpe` extensions, resources. |
 | **Compatibility Catalog** | `codexmorphe_builder/parser/compatibility.py` | Discovers target app package IDs and supported versions from DEX compatibility records. |
 | **Redundancy Filter** | `codexmorphe_builder/filter/root_filter.py` | Strips root/LSPosed redundant patches (`GmsCore`, `CloneApp`, `SpoofSignature`, PairIP anti-tamper). |
-| **Universal AST Transpiler** | `codexmorphe_builder/transpiler/classifier.py` | Maps Morphe bytecode mutations to the 5 Xposed/DexKit hook patterns. |
-| **Bundle Assembler** | `codexmorphe_builder/assembler/apk_packager.py` | Drives D8 merge, AAPT2 resource link, and APK assembly for `<pkg>-<flavor>-bundle.apk`. |
+| **Universal AST Transpiler** | `codexmorphe_builder/transpiler/recipe_builder.py` | Maps Morphe bytecode mutations to Xposed/DexKit hook patterns, enforces lifecycle safety, companion scanning, and hook deduplication. |
+| **Bundle Assembler** | `codexmorphe_builder/assembler/apk_packager.py` | Packages MultiDex `.mpe` files, AAPT2 resources, and dual `hooks.json` / `assets/hooks.json`. |
 | **Manifest Generator** | `codexmorphe_builder/assembler/manifest_gen.py` | Emits `bundle-manifest.json` indexing all providers, versions, and bundle SHA256 checksums. |
 
 ### Critical Execution Traces

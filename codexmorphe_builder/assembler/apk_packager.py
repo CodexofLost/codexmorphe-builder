@@ -33,11 +33,13 @@ def assemble_bundle_apk(
                         data = res_zip.read(item.filename)
                         apk.writestr(item.filename, data)
 
-        # 3. Add dynamic hook recipes container (hooks.json)
+        # 3. Add dynamic hook recipes container (hooks.json) at both root and assets/
         if hooks_data:
             apk.writestr("hooks.json", hooks_data)
+            apk.writestr("assets/hooks.json", hooks_data)
         elif hooks_file and hooks_file.exists():
             apk.write(hooks_file, arcname="hooks.json")
+            apk.write(hooks_file, arcname="assets/hooks.json")
 
     return output_apk
 

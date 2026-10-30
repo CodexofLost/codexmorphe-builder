@@ -13,6 +13,14 @@ def clean_type(t: str) -> str:
     if not t:
         return "void"
     t = t.strip()
+    # Reject invalid type descriptors containing method/field markers
+    if ";" in t and "->" in t:
+        return ""
+    if any(c in t for c in (" ", "(", ")", ":")):
+        return ""
+    if t.count(";") > 1:
+        return ""
+
     if t == "V":
         return "void"
     if t == "Z":
@@ -31,11 +39,41 @@ def clean_type(t: str) -> str:
         return "byte"
     if t == "C":
         return "char"
+    if t == "L":
+        return ""  # Wildcard object descriptor in Morphe, not a concrete type
+
     if t.startswith("L") and t.endswith(";"):
-        return t[1:-1].replace("/", ".")
+        inner = t[1:-1]
+        if ";" in inner or " " in inner or "->" in inner:
+            return ""
+        return inner.replace("/", ".")
     if t.startswith("["):
-        return clean_type(t[1:]) + "[]"
-    return t.replace("/", ".")
+        sub = clean_type(t[1:])
+        return f"{sub}[]" if sub else ""
+    if "/" in t:
+        return t.replace("/", ".")
+    return t
+
+
+def is_valid_class_name(name: str) -> bool:
+    """Validate that a string is a clean, fully-qualified Java class name."""
+    if not name or len(name) < 2:
+        return False
+    if any(c in name for c in (";", "->", " ", "(", ")", ":", "[", "<", ">", "$$")):
+        return False
+    if is_extension_package(name):
+        return False
+    return bool(re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*(\.[a-zA-Z_$][a-zA-Z0-9_$]*)*$', name))
+
+
+def is_extension_package(name: str) -> bool:
+    """Return True if class or path belongs to an extension/patcher package rather than the host app."""
+    return any(name.startswith(p) for p in (
+        "app.morphe.", "app.hushgram.", "app.piko.", "app.crimera.",
+        "app.rushiranpise.", "app.devanced.", "app.okish.",
+        "app/morphe/", "app/hushgram/", "app/piko/", "app/crimera/",
+        "app/rushiranpise/", "app/devanced/", "app/okish/", "Lapp/"
+    ))
 
 
 def parse_jvm_class(data: bytes) -> Tuple[List[str], List[str], List[int]]:
@@ -159,16 +197,6 @@ def discover_extension_entrypoints(
             pass
 
     return entrypoints
-
-
-def is_extension_package(name: str) -> bool:
-    """Return True if class or path belongs to an extension/patcher package rather than the host app."""
-    return any(name.startswith(p) for p in (
-        "app.morphe.", "app.hushgram.", "app.piko.", "app.crimera.",
-        "app.rushiranpise.", "app.devanced.", "app.okish.",
-        "app/morphe/", "app/hushgram/", "app/piko/", "app/crimera/",
-        "app/rushiranpise/", "app/devanced/", "app/okish/", "Lapp/"
-    ))
 
 
 def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dict[str, Any]]:
@@ -324,7 +352,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                     s_clean = ival.strip()
                     if s_clean.startswith('L') and s_clean.endswith(';'):
                         cls_name = clean_type(s_clean)
-                        if not is_extension_package(cls_name):
+                        if cls_name and is_valid_class_name(cls_name):
                             if 'declaring_class' not in fp:
                                 fp['declaring_class'] = cls_name
                     elif s_clean.startswith('/') and s_clean.endswith(';'):
@@ -333,12 +361,12 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                         if 'return_type' not in fp:
                             fp['return_type'] = clean_type(s_clean)
                     elif re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*$', s_clean) and s_clean not in (
-                        'V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C', 'L', '<this>', 'this', 'patch', 'injected', 'method'
+                        'V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C', 'L', '<this>', 'this', 'patch', 'injected', 'method', 'invoke'
                     ):
-                        if 'method_name' not in fp:
+                        if 'method_name' not in fp and not s_clean.startswith("app"):
                             fp['method_name'] = s_clean
                     elif (
-                        len(s_clean) > 1
+                        len(s_clean) > 2
                         and not is_extension_package(s_clean)
                         and "Fingerprint" not in s_clean
                         and not s_clean.endswith("(...)")
@@ -348,7 +376,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                         candidate_strings.append(s_clean)
                 elif const_tag == 'Class' and isinstance(ival, str):
                     cls_name = clean_type(ival)
-                    if not is_extension_package(cls_name) and not cls_name.startswith('java.'):
+                    if cls_name and is_valid_class_name(cls_name) and not cls_name.startswith('java.'):
                         if 'declaring_class' not in fp:
                             fp['declaring_class'] = cls_name
                 elif isinstance(ival, int) and 1000 < ival < 2000000000:
@@ -360,11 +388,15 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                 in_array = False
                 for tag, x in pending_list:
                     if isinstance(x, str):
-                        if x.startswith('L') or x in ('V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C'):
-                            param_types.append(clean_type(x))
+                        if x == 'L':
+                            param_types.append('L')
+                        elif x.startswith('L') or x in ('V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C'):
+                            ct = clean_type(x)
+                            if ct:
+                                param_types.append(ct)
                         elif (
                             tag == 'String'
-                            and len(x) > 1
+                            and len(x) > 2
                             and not is_extension_package(x)
                             and "Fingerprint" not in x
                             and not x.endswith("(...)")
@@ -374,14 +406,27 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                 pending_list = []
 
     if param_types:
-        fp['param_types'] = param_types
+        # If param_types contains wildcard 'L', DexKit cannot load class 'L', so switch to param_count
+        if any(p == 'L' for p in param_types):
+            fp['param_count'] = len(param_types)
+            fp['param_types'] = []
+        else:
+            fp['param_types'] = param_types
+
     if candidate_strings:
         fp['strings'] = candidate_strings[:5]
+
+    # Clean overly broad declaring classes
+    declaring_cls = fp.get('declaring_class')
+    if declaring_cls in ('java.lang.Object', 'android.content.res.Resources', 'android.view.View'):
+        if not fp.get('method_name'):
+            del fp['declaring_class']
 
     has_discriminator = bool(
         fp.get('method_name') or
         fp.get('strings') or
         fp.get('param_types') or
+        fp.get('param_count') or
         fp.get('literal') or
         fp.get('declaring_class')
     )
@@ -391,12 +436,18 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     return fp
 
 
-def classify_action_from_signature(ext_call: str, smali_text: str = "") -> str:
+def classify_action_from_signature(ext_call: str, smali_text: str = "", target_method: str = "") -> str:
     """Classify LibXposed hook action based on extension method descriptor and bytecode."""
+    # Critical invariant: Android lifecycle methods must ALWAYS run METHOD_AFTER
+    if target_method in ("onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart", "onPause", "onStop", "onDestroy"):
+        return "METHOD_AFTER"
+    if "onCreate" in ext_call or "attachBaseContext" in ext_call:
+        return "METHOD_AFTER"
+
     ret_part = ext_call.split(")")[-1] if ")" in ext_call else ""
-    if ret_part == "Z" or "if-eqz" in smali_text or "if-nez" in smali_text:
+    if ret_part == "Z" and ("if-eqz" in smali_text or "if-nez" in smali_text):
         return "EARLY_RETURN_SUPPRESSOR"
-    if ret_part == "V" or "onCreate" in smali_text or "attachBaseContext" in smali_text or "invoke-super" in smali_text:
+    if ret_part == "V":
         return "METHOD_AFTER"
     return "RETURN_TRANSFORM"
 
@@ -405,7 +456,8 @@ def generate_hook_recipe_json(
     pkg: str,
     app_info: DiscoveredApp,
     archive: Optional[MppArchive] = None,
-    extracted_mpe: Optional[List[Path]] = None
+    extracted_mpe: Optional[List[Path]] = None,
+    retained_patches: Optional[List[str]] = None
 ) -> str:
     """
     Generate dynamic hooks.json manifest for any application by scanning
@@ -414,6 +466,8 @@ def generate_hook_recipe_json(
     """
     hooks: List[Dict[str, Any]] = []
     seen_hook_ids: Set[str] = set()
+    seen_target_exts: Set[Tuple[str, str, str]] = set()
+    seen_activity_init = False
 
     # 1. Discover extension entrypoints
     entrypoints = discover_extension_entrypoints(extracted_mpe, archive, app_tag=app_info.app_tag)
@@ -421,30 +475,63 @@ def generate_hook_recipe_json(
     # 2. Extract hook recipes from .mpp archive if provided
     if archive and archive.path.exists():
         app_tag = app_info.app_tag
+        other_known_tags = {"music", "youtube", "reddit", "instagram", "twitter", "waze", "twitch"} - {app_tag}
+
+        def is_patch_for_app(path: str) -> bool:
+            # Exclude other app primary directories (e.g. music when building youtube)
+            for other in other_known_tags:
+                if f"/{other}/" in path or f"app/morphe/patches/{other}/" in path:
+                    return False
+            return (
+                f"/{app_tag}/" in path
+                or f"app/morphe/patches/{app_tag}/" in path
+                or "/shared/" in path
+                or "/all/" in path
+            )
+
+        retained_set = set(retained_patches) if retained_patches is not None else None
+
         with zipfile.ZipFile(archive.path, "r") as z:
             names = z.namelist()
 
             patch_classes = [
                 n for n in names
                 if n.endswith(".class") and "$" not in n and ("PatchKt" in n or n.endswith("Patch.class"))
-                and (f"/{app_tag}/" in n or "/shared/" in n or "/all/" in n or app_tag in n)
+                and is_patch_for_app(n)
             ]
             fp_file_map = {n.split("/")[-1]: n for n in names if n.endswith("Fingerprint.class") and "$" not in n}
 
             for pf in patch_classes:
                 try:
+                    if retained_set is not None:
+                        # Match retained patches against class path
+                        patch_stem = pf.replace(".class", "")
+                        if not any(r in patch_stem or patch_stem in r for r in retained_set):
+                            continue
+
+                    p_dir = "/".join(pf.split("/")[:-1])
+                    companion_classes = [n for n in names if n.startswith(p_dir + "/") and n.endswith(".class") and "$" not in n]
+
+                    # Read combined bytes for patch class and companion classes in same directory
                     p_data = z.read(pf)
+                    companion_data = [z.read(cf) for cf in companion_classes]
+                    combined_bytes = p_data + b"".join(companion_data)
+
                     p_strings, _, _ = parse_jvm_class(p_data)
                     patch_name = next((s for s in p_strings if 3 < len(s) < 40 and not s.startswith("L") and not s.startswith("$") and " " in s), "")
 
-                    # 1. Clean fingerprint references (stripping SMAP/metadata type prefixes like Bapp/ or DLapp/)
-                    fp_matches = re.findall(rb'(?:L)?(app/[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint)', p_data)
+                    # Discover all fingerprints referenced in this patch or its companion classes
+                    fp_matches = re.findall(rb'(?:L)?(app/[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint)', combined_bytes)
                     fp_refs = set(m.decode("utf-8", errors="ignore") for m in fp_matches)
 
-                    ext_calls_raw = set(re.findall(rb'(?:Lapp/[a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', p_data))
+                    ext_calls_raw = set(re.findall(rb'(?:Lapp/[a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', combined_bytes))
                     ext_calls = [e.decode("utf-8", errors="ignore").lstrip("L").rstrip(";") for e in ext_calls_raw]
+                    # Filter out extension calls from other app tags
+                    ext_calls = [
+                        e for e in ext_calls
+                        if not any(f".{other}." in e or f"/{other}/" in e for other in other_known_tags)
+                    ]
 
-                    p_dir = "/".join(pf.split("/")[:-1])
                     all_text = " ".join(p_strings)
 
                     # --- Path A: Standard Fingerprint Matchers ---
@@ -460,6 +547,38 @@ def generate_hook_recipe_json(
                         if not fp_def:
                             continue
 
+                        target_mtd = fp_def.get('method_name', '')
+                        target_cls = fp_def.get('declaring_class', '')
+
+                        # Check for Activity Lifecycle Hooks (e.g. YouTubeActivityOnCreate)
+                        is_activity_on_create = (
+                            ('MainActivity' in target_cls or 'GoogleApiActivity' in target_cls)
+                            and (target_mtd == 'onCreate' or not target_mtd)
+                        ) or 'YouTubeActivityOnCreate' in fp_simple
+
+                        if is_activity_on_create:
+                            if seen_activity_init:
+                                continue  # Exactly one activity lifecycle hook registered
+                            init_ext = next((e for e in ext_calls if 'ActivityHook' in e and 'initialize' in e), None)
+                            if not init_ext:
+                                init_ext = f"app.morphe.extension.{app_tag}.settings.YouTubeActivityHook->initialize(Landroid/app/Activity;)V"
+
+                            seen_activity_init = True
+                            hook_recipe = {
+                                "id": f"{app_tag}_activity_lifecycle_init",
+                                "name": "Activity Lifecycle Initializer",
+                                "action": "METHOD_AFTER",
+                                "fingerprint": {
+                                    "declaring_class": "com.google.android.apps.youtube.app.watchwhile.MainActivity" if app_tag == "youtube" else target_cls,
+                                    "method_name": "onCreate",
+                                    "return_type": "void"
+                                },
+                                "extension_call": init_ext
+                            }
+                            hooks.append(hook_recipe)
+                            seen_hook_ids.add(hook_recipe["id"])
+                            continue
+
                         # Match to best extension call by token overlap
                         best_ext = None
                         if ext_calls:
@@ -472,16 +591,12 @@ def generate_hook_recipe_json(
                             if not best_ext:
                                 best_ext = ext_calls[0]
 
-                        # Activity Hook Lifecycle Initializer Resolution
-                        if 'GoogleApiActivity' in fp_def.get('declaring_class', '') or 'MainActivity' in fp_def.get('declaring_class', ''):
-                            for ext in ext_calls:
-                                if 'ActivityHook' in ext and 'initialize' in ext:
-                                    best_ext = ext
-                                    break
-                            if not best_ext:
-                                best_ext = f"app.morphe.extension.{app_tag}.settings.YouTubeActivityHook->initialize(Landroid/app/Activity;)V"
-
                         if not best_ext:
+                            continue
+
+                        # Deduplicate identical (target_class, target_method, extension_call) hooks
+                        target_key = (target_cls, target_mtd, best_ext)
+                        if target_cls and target_mtd and target_key in seen_target_exts:
                             continue
 
                         patch_id_prefix = re.sub(r"[^a-z0-9]+", "_", (patch_name or pf.split("/")[-1]).lower())[:15]
@@ -489,7 +604,7 @@ def generate_hook_recipe_json(
                         if hook_id in seen_hook_ids:
                             continue
 
-                        action = classify_action_from_signature(best_ext, all_text)
+                        action = classify_action_from_signature(best_ext, all_text, target_method=target_mtd)
 
                         hook_recipe: Dict[str, Any] = {
                             "id": hook_id,
@@ -501,26 +616,29 @@ def generate_hook_recipe_json(
 
                         hooks.append(hook_recipe)
                         seen_hook_ids.add(hook_id)
+                        if target_cls and target_mtd:
+                            seen_target_exts.add(target_key)
 
-                    # --- Path B: Direct Targets / Non-Fingerprint Patches (Hushgram, etc.) ---
+                    # --- Path B: Direct Targets / Non-Fingerprint Patches ---
                     if not fp_refs and ext_calls:
+                        # Extract only valid Java class names (avoiding method descriptors)
                         direct_classes = [
                             clean_type(x) for x in p_strings
                             if (x.startswith('Lcom/') or x.startswith('Landroid/'))
                             and x.endswith(';')
                             and not x.startswith('Lcom/android/tools/')
+                            and is_valid_class_name(clean_type(x))
                         ]
                         direct_methods = [
                             x for x in p_strings
                             if x in ('onCreate', 'onNewIntent', 'onCreateView', 'getView', 'onMeasure', 'onBackPressed', 'finish', 'onClick')
                         ]
 
-                        companion_files = [n for n in names if n.startswith(p_dir + '/') and n.endswith('.class') and n != pf]
                         comp_strings: List[str] = []
                         comp_return: Optional[str] = None
-                        for cf in companion_files:
+                        for cf in companion_classes:
                             cs, _, _ = parse_jvm_class(z.read(cf))
-                            if 'FingerprintsKt' in cf:
+                            if 'FingerprintsKt' in cf or 'TargetsKt' in cf:
                                 for s in cs:
                                     if (
                                         3 < len(s) < 50
@@ -557,7 +675,7 @@ def generate_hook_recipe_json(
                             if b_id in seen_hook_ids:
                                 continue
 
-                            action = classify_action_from_signature(ext, all_text)
+                            action = classify_action_from_signature(ext, all_text, target_method=target_mtd or "")
 
                             b_hook: Dict[str, Any] = {
                                 "id": b_id,
