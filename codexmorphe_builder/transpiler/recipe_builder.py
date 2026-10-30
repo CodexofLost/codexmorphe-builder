@@ -233,6 +233,8 @@ def discover_extension_entrypoints(
             matches = re.findall(rb'L([a-zA-Z0-9_$/]+/Utils);', data)
             for m in set(matches):
                 cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
+                if not is_extension_package(cls_name):
+                    continue
                 ep = f"{cls_name}#setContext"
                 if ep not in seen:
                     seen.add(ep)
