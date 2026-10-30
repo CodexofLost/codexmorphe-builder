@@ -563,7 +563,8 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
 
     COMMON_METHODS = {
         "onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart",
-        "onPause", "onStop", "onDestroy", "run", "toString", "equals", "hashCode", "close"
+        "onPause", "onStop", "onDestroy", "run", "toString", "equals", "hashCode", "close",
+        "getView", "onClick", "onItemClick", "onBackPressed"
     }
 
     # Strict guard: Common lifecycle or ubiquitous methods must NEVER be queried globally without class or strings!

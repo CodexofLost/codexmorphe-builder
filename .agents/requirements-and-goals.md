@@ -30,9 +30,9 @@ Resolve critical integration failures across the two-project framework:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **RC-1** | `codexmorphe-builder` | YouTube crash (NPE in `aiat.e()`), Instagram flooded with `Type mismatch in RETURN_TRANSFORM` | Path B emitted hooks with `declaring_class` but null `method_name` & empty `strings`. DexKit matched all methods in class. | Reject/constrain rules lacking `method_name`, unique `strings`, or `param_types`. | ✅ RESOLVED |
 | **RC-2** | `codexmorphe-builder` | Constructor hooks fail to match DexKit query | Fingerprints ending in `Constructor` left `method_name` as null instead of `"<init>"`. | Explicitly assign `method_name: "<init>"` for constructor fingerprints. | ✅ RESOLVED |
-| **RC-3** | `CodexMorphe` | Activities throw `ResourceNotFoundException` or show stock UI | `BundleResourceInjector` only injected into `Application.resources`. Activity contexts hold separate `Resources`. | Hook `registerActivityLifecycleCallbacks` on `app` to call `addModuleAssets` on `onActivityCreated` & `onActivityResumed`. | ⏳ PENDING |
-| **RC-4** | `CodexMorphe` | 10–20s launch freeze / ANR risk on app boot | Main-thread DexKit re-scanning hundreds of methods during `Application.onCreate`. | Implement `DexKitCacheBridge` backed by SharedPreferences keyed by package & `versionCode`. | ⏳ PENDING |
-| **RC-5** | `CodexMorphe` | Morphe settings/layouts cannot look up host resource IDs | `ResourceUtils.fallbackPackageName` uninitialized. | Dynamically set `fallbackPackageName = app.packageName` via reflection on bundle attach. | ⏳ PENDING |
+| **RC-3** | `CodexMorphe` | Activities throw `ResourceNotFoundException` or show stock UI | `BundleResourceInjector` only injected into `Application.resources`. Activity contexts hold separate `Resources`. | Hook `registerActivityLifecycleCallbacks` on `app` to call `addModuleAssets` on `onActivityCreated` & `onActivityResumed`. | ✅ RESOLVED |
+| **RC-4** | `CodexMorphe` | 10–35s launch freeze / ANR on app boot (splash stuck) | Main-thread DexKit re-scanning 1,125 methods during `Application.onCreate` blocks UI looper, triggering AMS 5s input and 10s broadcast ANR watchdogs. | Asynchronous background DexKit worker + Direct reflection fast path + Batched SharedPreferences cache. | 🔄 IN PROGRESS |
+| **RC-5** | `CodexMorphe` | Morphe settings/layouts cannot look up host resource IDs | `ResourceUtils.fallbackPackageName` uninitialized. | Dynamically set `fallbackPackageName = app.packageName` via reflection on bundle attach. | ✅ RESOLVED |
 
 ---
 
@@ -47,24 +47,44 @@ Resolve critical integration failures across the two-project framework:
   - [x] Extract exact parameters and return types
   - [x] Run unit tests (`test_recipe_builder.py`, `test_ast_transpiler.py` - 14/14 passed)
 - [x] **Phase 2: Commit, Push, and Rolling Release Gate**
-  - [x] Commit builder changes & push to `origin/main` (commits `13a8f5c`, `583787d`, `088af56`, `b680836`)
-  - [x] Trigger GitHub Actions `build-bundles.yml` (Run #41090022395 succeeded in 7m11s)
-  - [ ] 🛑 **CRITICAL USER GATE**: User taps "Fetch / Update Bundles" in CodexMorphe to download new bundles locally
+  - [x] Commit builder changes & push to `origin/main` (commits `13a8f5c`, `583787d`, `088af56`, `b680836`, `852cb3c`)
+  - [x] Trigger GitHub Actions `build-bundles.yml` (Runs #41090022395 and #41082257038 succeeded)
+  - [x] User tapped "Fetch / Update Bundles" in CodexMorphe to download new bundles locally
 - [x] **Phase 3: Harden `CodexMorphe` Client Engine & Absolute Decoupling**
   - [x] Remove all hardcoded author package names (`app.hushgram`, `app.piko`, etc.) across `BundleBridge.kt`, `DexKitHookDispatcher.kt`, and `ExtensionClassLoading.kt`
   - [x] Dynamic entrypoint and resource fallback resolution via `manifest.entrypoints` and `manifest.resourceFallbacks`
   - [x] Activity-level resource injection via `ActivityLifecycleCallbacks` (`onActivityCreated`, `onActivityResumed`)
   - [x] DexKit query guard & discriminator safety (reject unconstrained class matching)
-  - [x] DexKit signature caching (`DexKitCacheBridge` / SharedPreferences keyed by package & `versionCode`)
   - [x] On-Device compilation (`fast-gradlew assembleDebug` succeeded) and APK installed via ADB
-- [x] **Phase 4: Verification & Live Diagnostics**
-  - [x] User tapped "Fetch / Update Bundles" in CodexMorphe app
-  - [x] Launched YouTube and Instagram via ADB
-  - [x] Live logcat verified:
-    - YouTube launches crash-free without `aiat.e()` NPE or `BaseActivityHook: Unknown intent: null`
-    - Instagram launches crash-free without `LayoutInflater.getContext()` NPE or `Type mismatch in RETURN_TRANSFORM`
-    - Multi-match and unconstrained lifecycle wildcard guards actively caught and rejected 2,170+ method blasts (`<init>`, `onItemClick`, `onCreate`)
-    - Valid patch hooks bound successfully via LibXposed API 102 interceptors (`ARG_REWRITE`, `AFTER`, `RETURN_TRANSFORM`)
-  - [ ] Install updated `CodexMorphe` APK via `adb` or `rish`
-  - [ ] Stream logs via `pidcat com.google.android.youtube` and `pidcat com.instagram.android`
-  - [ ] Confirm crash-free launch and Morphe modded UI inflation
+- [ ] **Phase 4: Resolve Main-Thread Freeze & ANR (Cold Boot Optimization)**
+  - [x] Reproduce and record logcat on-device for YouTube and Instagram during freeze/ANR
+  - [x] Capture exact AMS stack trace: `Broadcast of Intent ... timed out at org.luckypray.dexkit.DexKitBridge.nativeFindMethod`
+  - [ ] Implement Direct Reflection Fast Path in `DexKitHookDispatcher` for known classes (e.g. `MainActivity.onCreate`)
+  - [ ] Implement Asynchronous Background Worker Thread for uncached DexKit bytecode analysis
+  - [ ] Eliminate expensive multi-string fallback loops across full APK in `queryMethods`
+  - [ ] Batch SharedPreferences writes to avoid disk sync stalls
+  - [ ] Verify instant, freeze-free startup on both Instagram and YouTube via live diagnostics
+
+---
+
+## 5. Live ANR Diagnostic Evidence
+
+### YouTube ANR Trace (`com.google.android.youtube`):
+```text
+AnrInfo{reason='Broadcast Timeout', message='Broadcast of Intent { act=android.intent.action.BOOT_COMPLETED flg=0x9000030 pkg=com.google.android.youtube cmp=com.google.android.youtube/androidx.work.impl.background.systemalarm.RescheduleReceiver }',
+stackTrace='
+  at org.luckypray.dexkit.DexKitBridge.nativeFindMethod(Native method)
+  at org.luckypray.dexkit.DexKitBridge.access$nativeFindMethod(DexKitBridge.kt:56)
+  at org.luckypray.dexkit.DexKitBridge$Companion.nativeFindMethod(unavailable:0)
+  at org.luckypray.dexkit.DexKitBridge.findMethod(DexKitBridge.kt:437)
+  at io.github.codexoflost.codexmorphe.hook.DexKitHookDispatcher.queryMethods(DexKitHookDispatcher.kt:292)
+  at io.github.codexoflost.codexmorphe.hook.DexKitHookDispatcher.bindDynamicHooksWithCache(DexKitHookDispatcher.kt:180)
+  at io.github.codexoflost.codexmorphe.hook.DexKitHookDispatcher.dispatch(DexKitHookDispatcher.kt:79)
+  at io.github.codexoflost.codexmorphe.hook.MainHook.onPackageReady$lambda$14(MainHook.kt:116)'}
+```
+
+### Instagram ANR Capture (`com.instagram.android`):
+```text
+mCurrentFocus=Window{76e7af5 u0 Application Not Responding: com.instagram.android}
+```
+**Mechanism:** 116 DexKit queries run synchronously inside `Application.onCreate` on the UI thread, blocking Android's main looper past the 5-second AMS input dispatch threshold.
