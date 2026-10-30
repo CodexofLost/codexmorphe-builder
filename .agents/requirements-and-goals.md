@@ -31,8 +31,10 @@ Resolve critical integration failures across the two-project framework:
 | **RC-1** | `codexmorphe-builder` | YouTube crash (NPE in `aiat.e()`), Instagram flooded with `Type mismatch in RETURN_TRANSFORM` | Path B emitted hooks with `declaring_class` but null `method_name` & empty `strings`. DexKit matched all methods in class. | Reject/constrain rules lacking `method_name`, unique `strings`, or `param_types`. | ✅ RESOLVED |
 | **RC-2** | `codexmorphe-builder` | Constructor hooks fail to match DexKit query | Fingerprints ending in `Constructor` left `method_name` as null instead of `"<init>"`. | Explicitly assign `method_name: "<init>"` for constructor fingerprints. | ✅ RESOLVED |
 | **RC-3** | `CodexMorphe` | Activities throw `ResourceNotFoundException` or show stock UI | `BundleResourceInjector` only injected into `Application.resources`. Activity contexts hold separate `Resources`. | Hook `registerActivityLifecycleCallbacks` on `app` to call `addModuleAssets` on `onActivityCreated` & `onActivityResumed`. | ✅ RESOLVED |
-| **RC-4** | `CodexMorphe` | 10–35s launch freeze / ANR on app boot (splash stuck) | Main-thread DexKit re-scanning 1,125 methods during `Application.onCreate` blocks UI looper, triggering AMS 5s input and 10s broadcast ANR watchdogs. | Asynchronous background DexKit worker + Direct reflection fast path + Batched SharedPreferences cache. | 🔄 IN PROGRESS |
+| **RC-4** | `CodexMorphe` | 10–35s launch freeze / ANR on app boot (splash stuck) | Main-thread DexKit re-scanning 1,125 methods during `Application.onCreate` blocks UI looper, triggering AMS 5s input and 10s broadcast ANR watchdogs. | Asynchronous background DexKit worker + Direct reflection fast path + Batched SharedPreferences cache. | ✅ RESOLVED |
 | **RC-5** | `CodexMorphe` | Morphe settings/layouts cannot look up host resource IDs | `ResourceUtils.fallbackPackageName` uninitialized. | Dynamically set `fallbackPackageName = app.packageName` via reflection on bundle attach. | ✅ RESOLVED |
+| **RC-6** | `CodexMorphe` | YouTube `InAppDownloadsPatch` throws `NoSuchMethodError: getEmptyRegistry()` | `BundleClassLoader` parent-first delegation loaded YouTube's stripped `com.google.protobuf.ExtensionRegistryLite` from `base.apk!classes3.dex`. | `BundleParentClassLoader` isolates `com.google.protobuf.ExtensionRegistry` to resolve full implementation from bundle DEX. | ✅ RESOLVED |
+| **RC-7** | `CodexMorphe` | Instagram crashes in `PreinflateManager` with `NullPointerException: LayoutInflater.getContext()` | `ViewStub.getLayoutInflater()` returns `null` by default on uncached ViewStubs. | Intercept `ViewStub.getLayoutInflater()` in `ExtensionClassLoading` to fall back to `LayoutInflater.from(context)`. | ✅ RESOLVED |
 
 ---
 
@@ -56,14 +58,20 @@ Resolve critical integration failures across the two-project framework:
   - [x] Activity-level resource injection via `ActivityLifecycleCallbacks` (`onActivityCreated`, `onActivityResumed`)
   - [x] DexKit query guard & discriminator safety (reject unconstrained class matching)
   - [x] On-Device compilation (`fast-gradlew assembleDebug` succeeded) and APK installed via ADB
-- [ ] **Phase 4: Resolve Main-Thread Freeze & ANR (Cold Boot Optimization)**
+- [x] **Phase 4: Resolve Main-Thread Freeze & ANR (Cold Boot Optimization)**
   - [x] Reproduce and record logcat on-device for YouTube and Instagram during freeze/ANR
   - [x] Capture exact AMS stack trace: `Broadcast of Intent ... timed out at org.luckypray.dexkit.DexKitBridge.nativeFindMethod`
-  - [ ] Implement Direct Reflection Fast Path in `DexKitHookDispatcher` for known classes (e.g. `MainActivity.onCreate`)
-  - [ ] Implement Asynchronous Background Worker Thread for uncached DexKit bytecode analysis
-  - [ ] Eliminate expensive multi-string fallback loops across full APK in `queryMethods`
-  - [ ] Batch SharedPreferences writes to avoid disk sync stalls
-  - [ ] Verify instant, freeze-free startup on both Instagram and YouTube via live diagnostics
+  - [x] Implement Direct Reflection Fast Path in `DexKitHookDispatcher` for known classes (e.g. `MainActivity.onCreate`)
+  - [x] Implement Asynchronous Background Worker Thread for uncached DexKit bytecode analysis
+  - [x] Eliminate expensive multi-string fallback loops across full APK in `queryMethods`
+  - [x] Batch SharedPreferences writes to avoid disk sync stalls
+  - [x] Verify instant, freeze-free startup on both Instagram and YouTube via live diagnostics
+- [x] **Phase 5: Runtime Crash Resolution & ClassLoader Isolation**
+  - [x] Identify `ExtensionRegistryLite.getEmptyRegistry()` `NoSuchMethodError` in YouTube `InAppDownloadsPatch`
+  - [x] Implement `BundleParentClassLoader` in `BundleClassLoader.kt` to isolate `com.google.protobuf.ExtensionRegistry`
+  - [x] Identify `LayoutInflater.getContext()` `NullPointerException` on `ViewStub.getLayoutInflater()` in Instagram `PreinflateManager`
+  - [x] Implement `ViewStub.getLayoutInflater()` fallback in `ExtensionClassLoading.kt`
+  - [x] Verified simultaneous, crash-free, zero-freeze execution for both apps on physical Android device
 
 ---
 
