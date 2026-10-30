@@ -13,7 +13,7 @@ OUTPUT_DIR = PROJECT_ROOT / "dist"
 LEDGER_FILE = CACHE_DIR / "build-ledger.json"
 
 # Release Settings (Approach C: Rolling Release)
-RELEASE_REPO = os.environ.get("RELEASE_REPO", "CodexMorphe/codexmorphe-builder")
+RELEASE_REPO = os.environ.get("RELEASE_REPO", "CodexofLost/codexmorphe-builder")
 RELEASE_TAG = os.environ.get("RELEASE_TAG", "bundles")
 
 # Ensure essential directories exist
