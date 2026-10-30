@@ -55,6 +55,21 @@ def clean_type(t: str) -> str:
     return t
 
 
+def is_framework_class(cls_name: str) -> bool:
+    """Return True if class belongs to standard Java/Kotlin/Android framework/runtime."""
+    if not cls_name:
+        return False
+    # Host activities and core application shells are genuine target classes
+    if cls_name.endswith("Activity") or cls_name.endswith("Application") or cls_name.endswith("AppShell"):
+        if not cls_name.startswith("android.app.Activity") and cls_name != "android.app.Application":
+            return False
+    return any(cls_name.startswith(p) for p in (
+        "java.", "javax.", "kotlin.", "kotlinx.", "j$.", "com.google.protobuf.",
+        "android.os.", "android.util.", "android.content.res.", "android.graphics.",
+        "android.view.", "android.widget."
+    ))
+
+
 def is_valid_class_name(name: str) -> bool:
     """Validate that a string is a clean, fully-qualified Java class name."""
     if not name or len(name) < 2:
@@ -184,9 +199,9 @@ def discover_extension_entrypoints(
                 except Exception:
                     pass
 
-    if not entrypoints and archive and archive.path.exists():
+    if not entrypoints and archive and Path(archive.path).exists():
         try:
-            with zipfile.ZipFile(archive.path, "r") as z:
+            with zipfile.ZipFile(Path(archive.path), "r") as z:
                 for n in z.namelist():
                     if (n.endswith(".mpe") or n.endswith(".dex")) and (not app_tag or app_tag in n or "shared" in n or n == "classes.dex"):
                         try:
@@ -353,8 +368,12 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                     if s_clean.startswith('L') and s_clean.endswith(';'):
                         cls_name = clean_type(s_clean)
                         if cls_name and is_valid_class_name(cls_name):
-                            if 'declaring_class' not in fp:
-                                fp['declaring_class'] = cls_name
+                            if is_framework_class(cls_name):
+                                if 'return_type' not in fp:
+                                    fp['return_type'] = cls_name
+                            else:
+                                if 'declaring_class' not in fp:
+                                    fp['declaring_class'] = cls_name
                     elif s_clean.startswith('/') and s_clean.endswith(';'):
                         fp['declaring_class_ends_with'] = s_clean.strip('/;').replace('/', '.')
                     elif s_clean in ('V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C'):
@@ -376,7 +395,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                         candidate_strings.append(s_clean)
                 elif const_tag == 'Class' and isinstance(ival, str):
                     cls_name = clean_type(ival)
-                    if cls_name and is_valid_class_name(cls_name) and not cls_name.startswith('java.'):
+                    if cls_name and is_valid_class_name(cls_name) and not is_framework_class(cls_name):
                         if 'declaring_class' not in fp:
                             fp['declaring_class'] = cls_name
                 elif isinstance(ival, int) and 1000 < ival < 2000000000:
@@ -416,11 +435,16 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     if candidate_strings:
         fp['strings'] = candidate_strings[:5]
 
-    # Clean overly broad declaring classes
+    # Clean overly broad or framework declaring classes
     declaring_cls = fp.get('declaring_class')
-    if declaring_cls in ('java.lang.Object', 'android.content.res.Resources', 'android.view.View'):
-        if not fp.get('method_name'):
+    if declaring_cls:
+        if is_framework_class(declaring_cls):
+            if 'return_type' not in fp:
+                fp['return_type'] = declaring_cls
             del fp['declaring_class']
+        elif declaring_cls in ('java.lang.Object', 'android.content.res.Resources', 'android.view.View'):
+            if not fp.get('method_name'):
+                del fp['declaring_class']
 
     has_discriminator = bool(
         fp.get('method_name') or
@@ -436,7 +460,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     return fp
 
 
-def classify_action_from_signature(ext_call: str, smali_text: str = "", target_method: str = "") -> str:
+def classify_action_from_signature(ext_call: str, smali_text: str = "", target_method: str = "", target_return: str = "") -> str:
     """Classify LibXposed hook action based on extension method descriptor and bytecode."""
     # Critical invariant: Android lifecycle methods must ALWAYS run METHOD_AFTER
     if target_method in ("onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart", "onPause", "onStop", "onDestroy"):
@@ -444,11 +468,23 @@ def classify_action_from_signature(ext_call: str, smali_text: str = "", target_m
     if "onCreate" in ext_call or "attachBaseContext" in ext_call:
         return "METHOD_AFTER"
 
+    # Pattern 2: Argument interception
+    if "move-result-object p" in smali_text or "move-result p" in smali_text:
+        return "ARG_REWRITE"
+
     ret_part = ext_call.split(")")[-1] if ")" in ext_call else ""
     if ret_part == "Z" and ("if-eqz" in smali_text or "if-nez" in smali_text):
         return "EARLY_RETURN_SUPPRESSOR"
     if ret_part == "V":
         return "METHOD_AFTER"
+
+    # Check for return type mismatch with primitive targets
+    ext_clean = clean_type(ret_part)
+    target_clean = clean_type(target_return) if target_return else ""
+    if target_clean and ext_clean != target_clean:
+        if target_clean in ("boolean", "int", "void", "long", "float", "double"):
+            return "METHOD_AFTER"
+
     return "RETURN_TRANSFORM"
 
 
@@ -550,26 +586,21 @@ def generate_hook_recipe_json(
                         target_mtd = fp_def.get('method_name', '')
                         target_cls = fp_def.get('declaring_class', '')
 
-                        # Check for Activity Lifecycle Hooks (e.g. YouTubeActivityOnCreate)
-                        is_activity_on_create = (
-                            ('MainActivity' in target_cls or 'GoogleApiActivity' in target_cls)
-                            and (target_mtd == 'onCreate' or not target_mtd)
-                        ) or 'YouTubeActivityOnCreate' in fp_simple
-
-                        if is_activity_on_create:
+                        # Check for Settings Trampoline Activity Lifecycle Hook (GoogleApiActivity)
+                        if 'GoogleApiActivity' in target_cls:
                             if seen_activity_init:
-                                continue  # Exactly one activity lifecycle hook registered
+                                continue
                             init_ext = next((e for e in ext_calls if 'ActivityHook' in e and 'initialize' in e), None)
                             if not init_ext:
                                 init_ext = f"app.morphe.extension.{app_tag}.settings.YouTubeActivityHook->initialize(Landroid/app/Activity;)V"
 
                             seen_activity_init = True
                             hook_recipe = {
-                                "id": f"{app_tag}_activity_lifecycle_init",
-                                "name": "Activity Lifecycle Initializer",
+                                "id": f"{app_tag}_google_api_activity_init",
+                                "name": "Google API Settings Activity Initializer",
                                 "action": "METHOD_AFTER",
                                 "fingerprint": {
-                                    "declaring_class": "com.google.android.apps.youtube.app.watchwhile.MainActivity" if app_tag == "youtube" else target_cls,
+                                    "declaring_class": "com.google.android.gms.common.api.GoogleApiActivity",
                                     "method_name": "onCreate",
                                     "return_type": "void"
                                 },
@@ -579,17 +610,23 @@ def generate_hook_recipe_json(
                             seen_hook_ids.add(hook_recipe["id"])
                             continue
 
+                        # When target is MainActivity, never attach YouTubeActivityHook (it crashes with Unknown intent: null)
+                        available_ext_calls = [
+                            e for e in ext_calls
+                            if not ('ActivityHook' in e and 'initialize' in e and 'MainActivity' in target_cls)
+                        ] or ext_calls
+
                         # Match to best extension call by token overlap
                         best_ext = None
-                        if ext_calls:
+                        if available_ext_calls:
                             words = [w for w in re.split(r'[^a-z0-9]', re.sub(r'([a-z])([A-Z])', r'\1 \2', fp_name).lower()) if len(w) > 3]
-                            for ext in ext_calls:
+                            for ext in available_ext_calls:
                                 mtd = ext.split("->")[1].split("(")[0].lower()
                                 if any(w in mtd for w in words) or mtd in fp_name.lower() or fp_name.lower() in mtd:
                                     best_ext = ext
                                     break
                             if not best_ext:
-                                best_ext = ext_calls[0]
+                                best_ext = available_ext_calls[0]
 
                         if not best_ext:
                             continue
@@ -604,7 +641,12 @@ def generate_hook_recipe_json(
                         if hook_id in seen_hook_ids:
                             continue
 
-                        action = classify_action_from_signature(best_ext, all_text, target_method=target_mtd)
+                        action = classify_action_from_signature(
+                            best_ext,
+                            all_text,
+                            target_method=target_mtd,
+                            target_return=fp_def.get('return_type', '')
+                        )
 
                         hook_recipe: Dict[str, Any] = {
                             "id": hook_id,
@@ -621,13 +663,14 @@ def generate_hook_recipe_json(
 
                     # --- Path B: Direct Targets / Non-Fingerprint Patches ---
                     if not fp_refs and ext_calls:
-                        # Extract only valid Java class names (avoiding method descriptors)
+                        # Extract only valid host Java class names (avoiding framework classes and method descriptors)
                         direct_classes = [
                             clean_type(x) for x in p_strings
                             if (x.startswith('Lcom/') or x.startswith('Landroid/'))
                             and x.endswith(';')
                             and not x.startswith('Lcom/android/tools/')
                             and is_valid_class_name(clean_type(x))
+                            and not is_framework_class(clean_type(x))
                         ]
                         direct_methods = [
                             x for x in p_strings
@@ -641,20 +684,29 @@ def generate_hook_recipe_json(
                             if 'FingerprintsKt' in cf or 'TargetsKt' in cf:
                                 for s in cs:
                                     if (
-                                        3 < len(s) < 50
+                                        4 < len(s) < 50
                                         and not s.startswith('L')
                                         and not s.endswith('(...)')
                                         and not any(ord(c) < 32 for c in s)
                                         and not is_extension_package(s)
-                                        and not any(k in s for k in ('Fingerprint', 'Exception', 'java/', '<'))
+                                        and not any(k in s.lower() for k in ('fingerprint', 'exception', 'java/', '<', 'patch', 'what', 'targets', 'predicate', 'element'))
                                     ):
                                         comp_strings.append(s)
                                     if s in ('Z', 'V', 'I'):
                                         comp_return = clean_type(s)
 
-                        for ext in ext_calls:
-                            target_cls = direct_classes[0] if direct_classes else None
-                            target_mtd = direct_methods[0] if direct_methods else None
+                        for idx, ext in enumerate(ext_calls):
+                            # Resolve target class & method intelligently
+                            ext_lower = ext.lower()
+                            if 'onapplicationcreate' in ext_lower:
+                                target_cls = next((c for c in direct_classes if 'shell' in c.lower() or 'app' in c.lower()), direct_classes[0] if direct_classes else None)
+                                target_mtd = 'onCreate'
+                            elif 'onnewintent' in ext_lower:
+                                target_cls = next((c for c in direct_classes if 'activity' in c.lower()), direct_classes[-1] if direct_classes else None)
+                                target_mtd = 'onNewIntent'
+                            else:
+                                target_cls = direct_classes[idx] if idx < len(direct_classes) else (direct_classes[0] if direct_classes else None)
+                                target_mtd = direct_methods[idx] if idx < len(direct_methods) else (direct_methods[0] if direct_methods else None)
 
                             if not target_cls and not comp_strings:
                                 continue
@@ -664,7 +716,8 @@ def generate_hook_recipe_json(
                                 b_fp['declaring_class'] = target_cls
                             if target_mtd:
                                 b_fp['method_name'] = target_mtd
-                            if comp_strings:
+                            # Only include strings if we don't have an exact class + method target
+                            if comp_strings and (not target_cls or not target_mtd):
                                 b_fp['strings'] = comp_strings[:3]
                             if comp_return:
                                 b_fp['return_type'] = comp_return
@@ -675,7 +728,12 @@ def generate_hook_recipe_json(
                             if b_id in seen_hook_ids:
                                 continue
 
-                            action = classify_action_from_signature(ext, all_text, target_method=target_mtd or "")
+                            action = classify_action_from_signature(
+                                ext,
+                                all_text,
+                                target_method=target_mtd or "",
+                                target_return=comp_return or ""
+                            )
 
                             b_hook: Dict[str, Any] = {
                                 "id": b_id,

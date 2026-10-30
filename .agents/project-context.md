@@ -1,7 +1,7 @@
 ---
-context_version: 1.0.5
+context_version: 1.0.6
 synced_commit: HEAD
-synced_at: "2026-10-30T15:10:00Z"
+synced_at: "2026-10-30T18:50:00Z"
 ---
 
 # Project Context: codexmorphe-builder
@@ -12,7 +12,7 @@ synced_at: "2026-10-30T15:10:00Z"
 | :--- | :--- |
 | **Identifier** | `codexmorphe-builder` |
 | **Runtime / Platform** | Python 3.10+ / Linux & Android Termux (`aarch64`) |
-| **Toolchain & Prerequisites** | `d8` (Android SDK 30+), `aapt2`, `java` (OpenJDK 17/21), `git` |
+| **Toolchain & Prerequisites** | `d8` (Android SDK 30+), `aapt2`, `java` (OpenJDK 17/21), `git`, `gh` CLI |
 | **Environment & Config** | `codexmorphe_builder/config.py` (resolves toolchain paths and defaults) |
 | **Core Stack** | Standard Library (`zipfile`, `json`, `urllib`, `subprocess`), Python `argparse` |
 | **Security & Auth** | `GITHUB_TOKEN` for CI release fetching; Ed25519 / Android V2 APK signing |
@@ -28,7 +28,7 @@ synced_at: "2026-10-30T15:10:00Z"
 | **MPP Archive Parser** | `codexmorphe_builder/parser/mpp_archive.py` | Inspects `.mpp` ZIP container: extracts DEX, `.mpe` extensions, resources. |
 | **Compatibility Catalog** | `codexmorphe_builder/parser/compatibility.py` | Discovers target app package IDs and supported versions from DEX compatibility records. |
 | **Redundancy Filter** | `codexmorphe_builder/filter/root_filter.py` | Strips root/LSPosed redundant patches (`GmsCore`, `CloneApp`, `SpoofSignature`, PairIP anti-tamper). |
-| **Universal AST Transpiler** | `codexmorphe_builder/transpiler/recipe_builder.py` | Maps Morphe bytecode mutations to Xposed/DexKit hook patterns, enforces lifecycle safety, companion scanning, and hook deduplication. |
+| **Universal AST Transpiler** | `codexmorphe_builder/transpiler/recipe_builder.py` | Maps Morphe bytecode mutations to Xposed/DexKit hook patterns, enforces lifecycle safety, framework class filtering, companion scanning, and hook deduplication. |
 | **Bundle Assembler** | `codexmorphe_builder/assembler/apk_packager.py` | Packages MultiDex `.mpe` files, AAPT2 resources, and dual `hooks.json` / `assets/hooks.json`. |
 | **Manifest Generator** | `codexmorphe_builder/assembler/manifest_gen.py` | Emits `bundle-manifest.json` indexing all providers, versions, and bundle SHA256 checksums. |
 
@@ -48,13 +48,19 @@ synced_at: "2026-10-30T15:10:00Z"
 ## 4. Architectural Invariants & Guardrails
 
 * **Zero Custom Recipes:** Never hand-write app-specific hook recipes. All hooks must be generated automatically by the AST Transpiler from the `.mpp` patch bytecode.
+* **Universal Transpilation Safety:**
+  * `is_framework_class`: Framework types (`java.*`, `javax.*`, `kotlin.*`, `j$.*`, `android.os.*`, `android.util.*`, `android.content.res.*`, `android.graphics.*`) must never be mapped as `declaring_class`.
+  * `Positional Fingerprint Parsing`: In Morphe Patcher, `definingClass` is strictly constructor argument 2 (`p1`). Argument 5 is `returnType`, Argument 6 is `parameters`.
+  * `Intelligent Companion Mapping`: Companion classes without explicit fingerprints are dynamically mapped by target class (`InstagramAppShell`, `InstagramMainActivity`) and lifecycle methods (`onCreate`, `onNewIntent`), while purging compiler exception strings.
+  * `Return Type Preservation`: Methods returning primitives must not have object-returning extensions mapped as `RETURN_TRANSFORM`.
 * **No Redundant Shims:** Never package `GmsCore`, microG redirections, package cloning, or signature spoofing patches into bundles.
 * **Modular Community PRs:** Sources must exist exclusively as separate files in `sources/*.json`. Never merge multiple source declarations into a single monolithic JSON file.
 * **Deterministic Cache Ledger:** Never rebuild or re-download an unchanged release. Check `tag_name` and `sha256` before initiating compilation.
 
 ### Known Landmines & Anti-Hallucination Guardrails
 * `TRAP: Blindly merging two .mpp patchsets into one bundle` → `RISK: Namespace collision and hook conflicts between competing extensions` → `FIX: Emit isolated source-flavored bundles (<pkg>-<source_id>-bundle.apk) and let CodexMorphe client select provider`
-* `TRAP: Including PairIP anti-tamper bypass in stock APK hooks` → `RISK: Tampering with genuine Google Play Store VM checks triggers false app integrity alerts` → `FIX: Drop anti-tamper shims while preserving genuine feature unlock patches`
+* `TRAP: Hooking BaseActivityHook to MainActivity.onCreate` → `RISK: Normal app launches have null intent data, causing "BaseActivityHook: Unknown intent: null" and ART crash` → `FIX: Hook BaseActivityHook exclusively to GoogleApiActivity.onCreate`
+* `TRAP: Inadvertently classifying ARG_REWRITE as RETURN_TRANSFORM` → `RISK: Extension returns Object/Uri to a method expecting Boolean/int, crashing ART with ClassCastException` → `FIX: Compare target return type and smali instruction pattern (move-result-object p)`
 * `TRAP: Running raw ./gradlew on Termux` → `RISK: Termux environment crashes or hangs due to missing wrapper environment fixes` → `FIX: Use fast-gradlew exclusively for any local Android compilation`
 
 ## 5. End-to-End Data & State Flow Pipelines
@@ -81,5 +87,5 @@ python3 -m codexmorphe_builder build --all
 python3 -m codexmorphe_builder build --app com.google.android.youtube
 
 # Run automated validation test suite
-pytest tests/ -v
+python3 -m unittest discover tests -v
 ```

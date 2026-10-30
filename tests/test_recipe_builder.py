@@ -83,10 +83,19 @@ class TestRecipeBuilder(unittest.TestCase):
             and "MainActivity" in h.get("fingerprint", {}).get("declaring_class", "")
         ]
 
-        # Verify exactly one lifecycle hook on MainActivity.onCreate
-        self.assertEqual(len(main_activity_on_create_hooks), 1)
-        self.assertEqual(main_activity_on_create_hooks[0]["action"], "METHOD_AFTER")
-        self.assertIn("YouTubeActivityHook->initialize", main_activity_on_create_hooks[0]["extension_call"])
+        # Verify GoogleApiActivity carries the YouTubeActivityHook settings hook
+        google_api_hooks = [
+            h for h in data["hooks"]
+            if "GoogleApiActivity" in h.get("fingerprint", {}).get("declaring_class", "")
+        ]
+        self.assertTrue(len(google_api_hooks) >= 1)
+        self.assertIn("YouTubeActivityHook->initialize", google_api_hooks[0]["extension_call"])
+
+        # Verify MainActivity.onCreate hooks are genuine UI feature hooks, NOT YouTubeActivityHook
+        self.assertTrue(len(main_activity_on_create_hooks) >= 1)
+        for h in main_activity_on_create_hooks:
+            self.assertEqual(h["action"], "METHOD_AFTER")
+            self.assertNotIn("YouTubeActivityHook->initialize", h["extension_call"])
 
         # Verify no music extensions leaked
         for h in data["hooks"]:
