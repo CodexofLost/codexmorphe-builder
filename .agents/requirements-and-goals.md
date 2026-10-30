@@ -34,23 +34,23 @@ Resolve the critical integration failure across the two-project framework:
 - [x] Commit builder changes with clean semantic commit message (`789a8f1`).
 - [x] Push to `origin/main` in `codexmorphe-builder`.
 - [x] Monitor GitHub Actions workflow (`build-bundles.yml`, run `41110320818`) to completion (Success in 7m33s).
-- [ ] 🛑 **USER GATE**: Prompt user to open CodexMorphe app and tap **"Fetch / Update Bundles"**.
+- [x] 🛑 **USER GATE**: Confirmed: user opened CodexMorphe and tapped **"Fetch / Update Bundles"**.
 
 ### Phase 3: Harden `CodexMorphe` Client Engine
 - [x] Implement Activity-level resource injection in `BundleResourceInjector.kt` via `ActivityLifecycleCallbacks`.
 - [x] Add runtime DexKit query guard in `DexKitHookDispatcher.kt`.
 - [x] Implement `DexKitCacheBridge` with `SharedPreferences` keyed by package name and `versionCode`.
 - [x] Set `ResourceUtils.fallbackPackageName` and target package context before invoking extension initializers.
-- [ ] Build client APK (prompting user: local `fast-gradlew` vs GitHub Actions).
+- [x] Build client APK locally using `fast-gradlew assembleDebug` (Build successful in 78s).
 
 ### Phase 4: Verification & Live Diagnostics
-- [ ] Install updated `CodexMorphe` APK via `adb install -r` or Shizuku (`rish`).
-- [ ] Run live diagnostics via `pidcat com.google.android.youtube` and `pidcat com.instagram.android`.
-- [ ] Verify clean launch without NPEs, type mismatch errors, or resource inflation exceptions.
+- [x] Install updated `CodexMorphe` APK via `adb install -r`.
+- [x] Run live diagnostics on YouTube (`com.google.android.youtube`) and Instagram (`com.instagram.android`).
+- [x] Verify clean launch without NPEs (`aiat.e`), type mismatch errors, or resource inflation exceptions. Both processes running stably.
 
 ### Dead Code Cleanup (`codexmorphe-builder`)
-- [ ] Present audit findings and detailed plan (pros/cons, removal rationale) to user.
-- [ ] Remove unused `d8_merger.py` and uncalled `MppArchive.extract_file()`.
-- [ ] Remove dead static Kotlin generator prototype (`classifier.py`, `fingerprint.py`, `generator.py`, `test_ast_transpiler.py`).
-- [ ] Remove dead imports across 8 files and orphaned `PatchCatalogItem`.
-- [ ] Re-run unit tests and commit cleanup.
+- [x] Present audit findings and detailed plan (pros/cons, removal rationale) to user.
+- [x] Remove unused `d8_merger.py` and uncalled `MppArchive.extract_file()`.
+- [x] Remove dead static Kotlin generator prototype (`classifier.py`, `fingerprint.py`, `generator.py`, `test_ast_transpiler.py`).
+- [x] Remove dead imports across 8 files and orphaned `PatchCatalogItem`.
+- [x] Re-run unit tests (all 12 passed), commit (`76cb68a`), and push cleanup to `origin/main`.
