@@ -413,7 +413,12 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     candidate_strings: List[str] = []
 
     file_name = class_name.split("/")[-1].replace(".class", "")
-    is_constructor = "Constructor" in file_name or file_name.endswith("ConstructorFingerprint")
+    is_constructor = (
+        "Constructor" in file_name
+        or file_name.endswith("ConstructorFingerprint")
+        or file_name.endswith("CtorFingerprint")
+        or "Ctor" in file_name
+    )
 
     for itype, const_tag, ival in instructions:
         if itype == 'anewarray':
@@ -465,8 +470,12 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>')
                         ):
                             candidate_strings.append(s_clean)
-                    elif re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*$', s_clean) and s_clean not in (
-                        'V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C', 'L', '<this>', 'this', 'patch', 'injected', 'method', 'invoke'
+                    elif (
+                        not is_constructor
+                        and re.match(r'^[a-z_$][a-zA-Z0-9_$]*$', s_clean)
+                        and s_clean not in (
+                            'this', '<this>', 'patchContext', 'patch', 'method', 'invoke', 'injected'
+                        )
                     ):
                         if 'method_name' not in fp and not s_clean.startswith("app"):
                             fp['method_name'] = s_clean
@@ -511,7 +520,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             candidate_strings.append(x)
                 pending_list = []
 
-    if is_constructor and ('method_name' not in fp or not fp.get('method_name')):
+    if is_constructor:
         fp['method_name'] = "<init>"
         if 'return_type' not in fp:
             fp['return_type'] = "void"
@@ -704,9 +713,9 @@ def generate_hook_recipe_json(
                             continue
 
                         # Constructor detection fallback
-                        if ("Constructor" in fp_simple or fp_name.endswith("Constructor")) and not fp_def.get('method_name'):
+                        if "Constructor" in fp_simple or fp_name.endswith("Constructor") or "Ctor" in fp_simple:
                             fp_def['method_name'] = "<init>"
-                            if 'return_type' not in fp_def:
+                            if 'return_type' not in fp_def or not fp_def.get('return_type'):
                                 fp_def['return_type'] = "void"
 
                         # Guard against wildcard queries in Path A:

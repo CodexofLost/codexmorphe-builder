@@ -134,6 +134,35 @@ class TestRecipeBuilder(unittest.TestCase):
         for h in data["hooks"]:
             self.assertNotIn("app/morphe/extension/music", h["extension_call"])
 
+    def test_constructor_and_discriminator_safety(self):
+        cache_dir = Path(__file__).parents[1] / ".cache" / "mpp"
+        mpp_candidates = list(cache_dir.glob("*official*.mpp"))
+        if not mpp_candidates:
+            self.skipTest("Official MPP not present in cache")
+
+        archive = MppArchive.from_file(mpp_candidates[0])
+        app_info = DiscoveredApp(
+            package_name="com.google.android.youtube",
+            app_name="YouTube",
+            app_tag="youtube"
+        )
+        res = generate_hook_recipe_json("com.google.android.youtube", app_info, archive=archive)
+        data = json.loads(res)
+
+        # 1. autonavconstructor must target <init> with "main_app_autonav" in strings
+        autonav = next((h for h in data["hooks"] if "autonavconstructor" in h["id"]), None)
+        self.assertIsNotNone(autonav)
+        self.assertEqual(autonav["fingerprint"]["method_name"], "<init>")
+        self.assertEqual(autonav["fingerprint"]["return_type"], "void")
+        self.assertIn("main_app_autonav", autonav["fingerprint"].get("strings", []))
+
+        # 2. No UPPERCASE constants as method_name
+        for h in data["hooks"]:
+            fp = h["fingerprint"]
+            m_name = fp.get("method_name")
+            if m_name and m_name != "<init>":
+                self.assertFalse(m_name.isupper() and len(m_name) > 3, f"Constant assigned as method_name: {m_name} in {h['id']}")
+
 
 if __name__ == "__main__":
     unittest.main()
