@@ -441,14 +441,30 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             if is_framework_class(cls_name):
                                 if 'return_type' not in fp:
                                     fp['return_type'] = cls_name
+                                else:
+                                    param_types.append(cls_name)
                             else:
                                 if 'declaring_class' not in fp:
                                     fp['declaring_class'] = cls_name
+                                else:
+                                    param_types.append(cls_name)
                     elif s_clean.startswith('/') and s_clean.endswith(';'):
                         fp['declaring_class_ends_with'] = s_clean.strip('/;').replace('/', '.')
                     elif s_clean in ('V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C'):
                         if 'return_type' not in fp:
                             fp['return_type'] = clean_type(s_clean)
+                    elif "." in s_clean and not s_clean.endswith("..."):
+                        parts = s_clean.split(".")
+                        if len(parts) == 2 and parts[1] == fp.get('method_name'):
+                            fp['declaring_class_ends_with'] = parts[0]
+                        elif (
+                            len(s_clean) > 2
+                            and not is_extension_package(s_clean)
+                            and "Fingerprint" not in s_clean
+                            and not any(ord(c) < 32 for c in s_clean)
+                            and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>')
+                        ):
+                            candidate_strings.append(s_clean)
                     elif re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*$', s_clean) and s_clean not in (
                         'V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C', 'L', '<this>', 'this', 'patch', 'injected', 'method', 'invoke'
                     ):
@@ -513,6 +529,16 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         if candidate_strings:
             fp['strings'] = candidate_strings[:5]
 
+    # Check constant pool for companion Class.method hints if declaring class is not yet known
+    if 'declaring_class' not in fp and 'declaring_class_ends_with' not in fp and fp.get('method_name'):
+        m_name = fp['method_name']
+        for _, entry in cp.items():
+            if entry and entry[0] == 'Utf8' and isinstance(entry[1], str) and '.' in entry[1]:
+                parts = entry[1].split('.')
+                if len(parts) == 2 and parts[1] == m_name and is_valid_class_name(parts[0]):
+                    fp['declaring_class_ends_with'] = parts[0]
+                    break
+
     # Clean overly broad or framework declaring classes
     declaring_cls = fp.get('declaring_class')
     if declaring_cls:
@@ -533,6 +559,21 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         fp.get('literal') is not None
     )
     if not has_discriminator:
+        return None
+
+    COMMON_METHODS = {
+        "onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart",
+        "onPause", "onStop", "onDestroy", "run", "toString", "equals", "hashCode", "close"
+    }
+
+    # Strict guard: Common lifecycle or ubiquitous methods must NEVER be queried globally without class or strings!
+    if (
+        fp.get("method_name") in COMMON_METHODS
+        and not fp.get("declaring_class")
+        and not fp.get("declaring_class_ends_with")
+        and not fp.get("strings")
+        and not fp.get("literal")
+    ):
         return None
 
     return fp
