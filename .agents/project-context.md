@@ -49,6 +49,9 @@ synced_at: "2026-10-30T18:50:00Z"
 
 * **Zero Custom Recipes:** Never hand-write app-specific hook recipes. All hooks must be generated automatically by the AST Transpiler from the `.mpp` patch bytecode.
 * **Universal Transpilation Safety:**
+  * `Discriminator Validation & Wildcard Guard`: Reject any fingerprint or hook lacking `method_name`, `strings`, or `literal` to prevent DexKit from matching every method declared in the class.
+  * `Constructor Discrimination`: Detect constructor fingerprints (ending in `Constructor`) and assign `method_name: "<init>"` and `return_type: "void"`.
+  * `Dynamic Entrypoints & Resource Fallbacks`: Auto-discover lifecycle entrypoints (`SettingsEntry#onApplicationCreate`, `AddOnApi#initialize`, `Utils#setContext`) and `ResourceUtils` classes for any author package, emitting them under `entrypoints` and `resource_fallbacks` in `hooks.json`.
   * `is_framework_class`: Framework types (`java.*`, `javax.*`, `kotlin.*`, `j$.*`, `android.os.*`, `android.util.*`, `android.content.res.*`, `android.graphics.*`) must never be mapped as `declaring_class`.
   * `Positional Fingerprint Parsing`: In Morphe Patcher, `definingClass` is strictly constructor argument 2 (`p1`). Argument 5 is `returnType`, Argument 6 is `parameters`.
   * `Intelligent Companion Mapping`: Companion classes without explicit fingerprints are dynamically mapped by target class (`InstagramAppShell`, `InstagramMainActivity`) and lifecycle methods (`onCreate`, `onNewIntent`), while purging compiler exception strings.

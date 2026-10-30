@@ -47,17 +47,21 @@ Resolve critical integration failures across the two-project framework:
   - [x] Extract exact parameters and return types
   - [x] Run unit tests (`test_recipe_builder.py`, `test_ast_transpiler.py` - 14/14 passed)
 - [x] **Phase 2: Commit, Push, and Rolling Release Gate**
-  - [x] Commit builder changes & push to `origin/main` (commit `13a8f5c`)
-  - [x] Monitor GitHub Actions `build-bundles.yml` (Run #41074105016 succeeded in 8m15s)
-  - [x] 🛑 **CRITICAL USER GATE**: User tapped "Fetch / Update Bundles" in CodexMorphe (Completed)
-- [ ] **Phase 3: Harden `CodexMorphe` Client Engine & Absolute Decoupling**
-  - [ ] Remove all hardcoded author package names (`app.hushgram`, `app.piko`, etc.) across `BundleBridge.kt`, `DexKitHookDispatcher.kt`, and `ExtensionClassLoading.kt`
-  - [ ] Dynamic entrypoint and resource fallback resolution via `manifest.entrypoints` and `manifest.resourceFallbacks`
-  - [ ] Activity-level resource injection via `ActivityLifecycleCallbacks` (`onActivityCreated`, `onActivityResumed`)
-  - [ ] DexKit query guard & discriminator safety (reject unconstrained class matching)
-  - [ ] DexKit signature caching (`DexKitCacheBridge` / SharedPreferences keyed by package & `versionCode`)
-  - [ ] Prompt user for build choice (Local `fast-gradlew` vs Cloud CI/CD) and compile
+  - [x] Commit builder changes & push to `origin/main` (commits `13a8f5c`, `583787d`, `088af56`)
+  - [x] Trigger GitHub Actions `build-bundles.yml` (Run #41082257038 succeeded in 8m30s)
+  - [ ] 🛑 **CRITICAL USER GATE**: User taps "Fetch / Update Bundles" in CodexMorphe to download new bundles locally
+- [x] **Phase 3: Harden `CodexMorphe` Client Engine & Absolute Decoupling**
+  - [x] Remove all hardcoded author package names (`app.hushgram`, `app.piko`, etc.) across `BundleBridge.kt`, `DexKitHookDispatcher.kt`, and `ExtensionClassLoading.kt`
+  - [x] Dynamic entrypoint and resource fallback resolution via `manifest.entrypoints` and `manifest.resourceFallbacks`
+  - [x] Activity-level resource injection via `ActivityLifecycleCallbacks` (`onActivityCreated`, `onActivityResumed`)
+  - [x] DexKit query guard & discriminator safety (reject unconstrained class matching)
+  - [x] DexKit signature caching (`DexKitCacheBridge` / SharedPreferences keyed by package & `versionCode`)
+  - [x] On-Device compilation (`fast-gradlew assembleDebug` succeeded) and APK installed via ADB
 - [ ] **Phase 4: Verification & Live Diagnostics**
+  - [ ] 🛑 **CRITICAL USER GATE**: User taps "Fetch / Update Bundles" in CodexMorphe app
+  - [ ] Launch YouTube and Instagram
+  - [ ] Stream logs via `pidcat com.google.android.youtube` and `pidcat com.instagram.android`
+  - [ ] Confirm crash-free launch and Morphe modded UI inflation
   - [ ] Install updated `CodexMorphe` APK via `adb` or `rish`
   - [ ] Stream logs via `pidcat com.google.android.youtube` and `pidcat com.instagram.android`
   - [ ] Confirm crash-free launch and Morphe modded UI inflation
