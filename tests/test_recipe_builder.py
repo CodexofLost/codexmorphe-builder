@@ -60,6 +60,20 @@ class TestRecipeBuilder(unittest.TestCase):
                 self.assertFalse(";" in pt or "->" in pt)
             for s in fp.get("strings", []):
                 self.assertFalse("Fingerprint" in s or "app/morphe" in s or "app/hushgram" in s)
+            # Verify action schema
+            self.assertIn(h["action"], ("BEFORE", "AFTER", "REPLACE", "RETURN_TRANSFORM", "ARG_REWRITE", "CONSTANT_REPLACE"))
+            if h.get("extension_class"):
+                self.assertFalse(h["extension_class"].endswith(";"))
+
+        # Invariant: Zero wildcard class queries without method or strings
+        wildcards = [
+            h for h in data["hooks"]
+            if h.get("fingerprint", {}).get("declaring_class")
+            and not h.get("fingerprint", {}).get("method_name")
+            and not h.get("fingerprint", {}).get("strings")
+            and h.get("fingerprint", {}).get("literal") is None
+        ]
+        self.assertEqual(len(wildcards), 0)
 
     def test_generate_hook_recipe_json_youtube_lifecycle_safety(self):
         cache_dir = Path(__file__).parents[1] / ".cache" / "mpp"
@@ -94,8 +108,25 @@ class TestRecipeBuilder(unittest.TestCase):
         # Verify MainActivity.onCreate hooks are genuine UI feature hooks, NOT YouTubeActivityHook
         self.assertTrue(len(main_activity_on_create_hooks) >= 1)
         for h in main_activity_on_create_hooks:
-            self.assertEqual(h["action"], "METHOD_AFTER")
+            self.assertEqual(h["action"], "AFTER")
             self.assertNotIn("YouTubeActivityHook->initialize", h["extension_call"])
+
+        # Verify constructor discrimination
+        init_hooks = [
+            h for h in data["hooks"]
+            if h.get("fingerprint", {}).get("method_name") == "<init>"
+        ]
+        self.assertTrue(len(init_hooks) >= 50)
+
+        # Invariant: Zero wildcard class queries without method or strings
+        wildcards = [
+            h for h in data["hooks"]
+            if h.get("fingerprint", {}).get("declaring_class")
+            and not h.get("fingerprint", {}).get("method_name")
+            and not h.get("fingerprint", {}).get("strings")
+            and h.get("fingerprint", {}).get("literal") is None
+        ]
+        self.assertEqual(len(wildcards), 0)
 
         # Verify no music extensions leaked
         for h in data["hooks"]:

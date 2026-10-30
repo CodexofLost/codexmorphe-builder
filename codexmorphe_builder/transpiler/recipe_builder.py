@@ -51,8 +51,52 @@ def clean_type(t: str) -> str:
         sub = clean_type(t[1:])
         return f"{sub}[]" if sub else ""
     if "/" in t:
-        return t.replace("/", ".")
-    return t
+        return t.rstrip(";").replace("/", ".")
+    return t.rstrip(";")
+
+
+def parse_method_descriptor(desc: str) -> Tuple[List[str], str]:
+    """Parse JVM method descriptor into list of clean parameter types and return type."""
+    if not desc or not desc.startswith("(") or ")" not in desc:
+        return [], ""
+    param_str = desc[1:desc.index(")")]
+    ret_str = desc[desc.index(")")+1:]
+
+    params = []
+    i = 0
+    while i < len(param_str):
+        c = param_str[i]
+        if c in 'ZBCSIJFDV':
+            params.append(clean_type(c))
+            i += 1
+        elif c == 'L':
+            end = param_str.find(';', i)
+            if end != -1:
+                params.append(clean_type(param_str[i:end+1]))
+                i = end + 1
+            else:
+                break
+        elif c == '[':
+            dim = 0
+            while i < len(param_str) and param_str[i] == '[':
+                dim += 1
+                i += 1
+            if i < len(param_str):
+                if param_str[i] in 'ZBCSIJFD':
+                    base = clean_type(param_str[i])
+                    params.append(f"{base}{'[]' * dim}")
+                    i += 1
+                elif param_str[i] == 'L':
+                    end = param_str.find(';', i)
+                    if end != -1:
+                        base = clean_type(param_str[i:end+1])
+                        params.append(f"{base}{'[]' * dim}")
+                        i = end + 1
+                    else:
+                        break
+        else:
+            i += 1
+    return [p for p in params if p], clean_type(ret_str)
 
 
 def is_framework_class(cls_name: str) -> bool:
@@ -355,6 +399,9 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     param_types: List[str] = []
     candidate_strings: List[str] = []
 
+    file_name = class_name.split("/")[-1].replace(".class", "")
+    is_constructor = "Constructor" in file_name or file_name.endswith("ConstructorFingerprint")
+
     for itype, const_tag, ival in instructions:
         if itype == 'anewarray':
             in_array = True
@@ -365,7 +412,17 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             else:
                 if const_tag == 'String' and isinstance(ival, str):
                     s_clean = ival.strip()
-                    if s_clean.startswith('L') and s_clean.endswith(';'):
+                    if s_clean == "<init>":
+                        fp['method_name'] = "<init>"
+                        if 'return_type' not in fp:
+                            fp['return_type'] = "void"
+                    elif s_clean.startswith("(") and ")" in s_clean:
+                        p_types, r_type = parse_method_descriptor(s_clean)
+                        if p_types and not param_types:
+                            param_types.extend(p_types)
+                        if r_type and 'return_type' not in fp:
+                            fp['return_type'] = r_type
+                    elif s_clean.startswith('L') and s_clean.endswith(';'):
                         cls_name = clean_type(s_clean)
                         if cls_name and is_valid_class_name(cls_name):
                             if is_framework_class(cls_name):
@@ -390,7 +447,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                         and "Fingerprint" not in s_clean
                         and not s_clean.endswith("(...)")
                         and not any(ord(c) < 32 for c in s_clean)
-                        and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method')
+                        and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>')
                     ):
                         candidate_strings.append(s_clean)
                 elif const_tag == 'Class' and isinstance(ival, str):
@@ -420,9 +477,15 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             and "Fingerprint" not in x
                             and not x.endswith("(...)")
                             and not any(ord(c) < 32 for c in x)
+                            and x != "<init>"
                         ):
                             candidate_strings.append(x)
                 pending_list = []
+
+    if is_constructor and ('method_name' not in fp or not fp.get('method_name')):
+        fp['method_name'] = "<init>"
+        if 'return_type' not in fp:
+            fp['return_type'] = "void"
 
     if param_types:
         # If param_types contains wildcard 'L', DexKit cannot load class 'L', so switch to param_count
@@ -433,7 +496,9 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             fp['param_types'] = param_types
 
     if candidate_strings:
-        fp['strings'] = candidate_strings[:5]
+        candidate_strings = [s for s in candidate_strings if s != "<init>"]
+        if candidate_strings:
+            fp['strings'] = candidate_strings[:5]
 
     # Clean overly broad or framework declaring classes
     declaring_cls = fp.get('declaring_class')
@@ -446,13 +511,13 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             if not fp.get('method_name'):
                 del fp['declaring_class']
 
+    # CRITICAL GUARD: A fingerprint MUST have at least one specific discriminator
+    # (method_name, non-empty strings, or a literal number).
+    # Declaring class alone is a wildcard query that matches ALL methods in that class.
     has_discriminator = bool(
         fp.get('method_name') or
         fp.get('strings') or
-        fp.get('param_types') or
-        fp.get('param_count') or
-        fp.get('literal') or
-        fp.get('declaring_class')
+        fp.get('literal') is not None
     )
     if not has_discriminator:
         return None
@@ -462,11 +527,11 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
 
 def classify_action_from_signature(ext_call: str, smali_text: str = "", target_method: str = "", target_return: str = "") -> str:
     """Classify LibXposed hook action based on extension method descriptor and bytecode."""
-    # Critical invariant: Android lifecycle methods must ALWAYS run METHOD_AFTER
+    # Critical invariant: Android lifecycle methods must ALWAYS run AFTER
     if target_method in ("onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart", "onPause", "onStop", "onDestroy"):
-        return "METHOD_AFTER"
+        return "AFTER"
     if "onCreate" in ext_call or "attachBaseContext" in ext_call:
-        return "METHOD_AFTER"
+        return "AFTER"
 
     # Pattern 2: Argument interception
     if "move-result-object p" in smali_text or "move-result p" in smali_text:
@@ -474,16 +539,16 @@ def classify_action_from_signature(ext_call: str, smali_text: str = "", target_m
 
     ret_part = ext_call.split(")")[-1] if ")" in ext_call else ""
     if ret_part == "Z" and ("if-eqz" in smali_text or "if-nez" in smali_text):
-        return "EARLY_RETURN_SUPPRESSOR"
+        return "BEFORE"
     if ret_part == "V":
-        return "METHOD_AFTER"
+        return "AFTER"
 
     # Check for return type mismatch with primitive targets
     ext_clean = clean_type(ret_part)
     target_clean = clean_type(target_return) if target_return else ""
     if target_clean and ext_clean != target_clean:
         if target_clean in ("boolean", "int", "void", "long", "float", "double"):
-            return "METHOD_AFTER"
+            return "AFTER"
 
     return "RETURN_TRANSFORM"
 
@@ -583,6 +648,17 @@ def generate_hook_recipe_json(
                         if not fp_def:
                             continue
 
+                        # Constructor detection fallback
+                        if ("Constructor" in fp_simple or fp_name.endswith("Constructor")) and not fp_def.get('method_name'):
+                            fp_def['method_name'] = "<init>"
+                            if 'return_type' not in fp_def:
+                                fp_def['return_type'] = "void"
+
+                        # Guard against wildcard queries in Path A:
+                        # Must have method_name, non-empty strings, or literal
+                        if not fp_def.get('method_name') and not fp_def.get('strings') and fp_def.get('literal') is None:
+                            continue
+
                         target_mtd = fp_def.get('method_name', '')
                         target_cls = fp_def.get('declaring_class', '')
 
@@ -595,16 +671,21 @@ def generate_hook_recipe_json(
                                 init_ext = f"app.morphe.extension.{app_tag}.settings.YouTubeActivityHook->initialize(Landroid/app/Activity;)V"
 
                             seen_activity_init = True
+                            init_cls = clean_type(init_ext.split("->")[0]) if "->" in init_ext else None
+                            init_mtd = init_ext.split("->")[1].split("(")[0].strip() if "->" in init_ext else None
                             hook_recipe = {
                                 "id": f"{app_tag}_google_api_activity_init",
                                 "name": "Google API Settings Activity Initializer",
-                                "action": "METHOD_AFTER",
+                                "action": "AFTER",
                                 "fingerprint": {
                                     "declaring_class": "com.google.android.gms.common.api.GoogleApiActivity",
                                     "method_name": "onCreate",
-                                    "return_type": "void"
+                                    "return_type": "void",
+                                    "param_types": ["android.os.Bundle"]
                                 },
-                                "extension_call": init_ext
+                                "extension_call": init_ext,
+                                "extension_class": init_cls,
+                                "extension_method": init_mtd
                             }
                             hooks.append(hook_recipe)
                             seen_hook_ids.add(hook_recipe["id"])
@@ -648,12 +729,17 @@ def generate_hook_recipe_json(
                             target_return=fp_def.get('return_type', '')
                         )
 
+                        ext_class = clean_type(best_ext.split("->")[0]) if "->" in best_ext else None
+                        ext_method = best_ext.split("->")[1].split("(")[0].strip() if "->" in best_ext else None
+
                         hook_recipe: Dict[str, Any] = {
                             "id": hook_id,
                             "name": patch_name or fp_name,
                             "action": action,
                             "fingerprint": fp_def,
-                            "extension_call": best_ext
+                            "extension_call": best_ext,
+                            "extension_class": ext_class,
+                            "extension_method": ext_method
                         }
 
                         hooks.append(hook_recipe)
@@ -708,7 +794,8 @@ def generate_hook_recipe_json(
                                 target_cls = direct_classes[idx] if idx < len(direct_classes) else (direct_classes[0] if direct_classes else None)
                                 target_mtd = direct_methods[idx] if idx < len(direct_methods) else (direct_methods[0] if direct_methods else None)
 
-                            if not target_cls and not comp_strings:
+                            # CRITICAL GUARD: Never emit a wildcard hook without method name or unique strings
+                            if not target_mtd and not comp_strings:
                                 continue
 
                             b_fp: Dict[str, Any] = {}
@@ -721,6 +808,10 @@ def generate_hook_recipe_json(
                                 b_fp['strings'] = comp_strings[:3]
                             if comp_return:
                                 b_fp['return_type'] = comp_return
+
+                            # Reject unconstrained queries (must have method_name, non-empty strings, or literal)
+                            if not b_fp.get('method_name') and not b_fp.get('strings') and b_fp.get('literal') is None:
+                                continue
 
                             ext_mtd_name = ext.split("->")[1].split("(")[0].lower()
                             patch_id_prefix = re.sub(r"[^a-z0-9]+", "_", (patch_name or pf.split("/")[-1]).lower())[:20]
@@ -735,12 +826,17 @@ def generate_hook_recipe_json(
                                 target_return=comp_return or ""
                             )
 
+                            b_ext_class = clean_type(ext.split("->")[0]) if "->" in ext else None
+                            b_ext_method = ext.split("->")[1].split("(")[0].strip() if "->" in ext else None
+
                             b_hook: Dict[str, Any] = {
                                 "id": b_id,
                                 "name": patch_name or b_id,
                                 "action": action,
                                 "fingerprint": b_fp,
-                                "extension_call": ext
+                                "extension_call": ext,
+                                "extension_class": b_ext_class,
+                                "extension_method": b_ext_method
                             }
 
                             hooks.append(b_hook)
