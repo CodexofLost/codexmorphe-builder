@@ -87,9 +87,10 @@ def compile_resources(
             print(f"[WARN] aapt2 compile error on iteration {iteration}: {res_compile.stderr[:300]}")
             return None
 
-        # 3. aapt2 link
+        # 3. aapt2 link as shared runtime library to prevent 0x7f package ID collisions
         link_cmd = [
             str(AAPT2_BIN), "link",
+            "--shared-lib",
             "--auto-add-overlay",
             "-o", str(out_apk),
             "--manifest", str(manifest_path),
