@@ -271,137 +271,239 @@ def discover_extension_entrypoints(
     return entrypoints, resource_fallbacks
 
 
+class ClassfileAst:
+    """
+    Pure Python JVM Classfile AST and constant pool parser.
+    Supports ClassFile format (major 45 through 65, Java 1.1 to 21+),
+    including invokedynamic / BootstrapMethods attributes and bytecode Code inspection.
+    """
+    def __init__(self, data: bytes):
+        self.cp: Dict[int, Tuple[str, Any]] = {}
+        self.methods: Dict[Tuple[str, str], bytes] = {}
+        self.bootstrap_methods: List[List[Any]] = []
+        self.super_class: str = ""
+        self.this_class: str = ""
+        self._parse(data)
+
+    def _parse(self, data: bytes):
+        if len(data) < 10:
+            return
+        magic, minor, major, cp_count = struct.unpack_from('>IHHH', data, 0)
+        if magic != 0xCAFEBABE:
+            return
+        pos = 10
+        i = 1
+        while i < cp_count:
+            if pos >= len(data):
+                break
+            tag = data[pos]
+            pos += 1
+            if tag == 1:  # Utf8
+                if pos + 2 > len(data): break
+                length, = struct.unpack_from('>H', data, pos); pos += 2
+                self.cp[i] = ('Utf8', data[pos:pos+length].decode('utf-8', errors='ignore'))
+                pos += length
+            elif tag in (3, 4):  # Integer, Float
+                if pos + 4 > len(data): break
+                val, = struct.unpack_from('>I', data, pos); pos += 4
+                self.cp[i] = ('Int' if tag == 3 else 'Float', val)
+            elif tag in (5, 6):  # Long, Double
+                if pos + 8 > len(data): break
+                val, = struct.unpack_from('>Q', data, pos); pos += 8
+                self.cp[i] = ('Long' if tag == 5 else 'Double', val)
+                i += 1  # 8-byte entries take 2 constant pool slots
+            elif tag == 7:  # Class
+                if pos + 2 > len(data): break
+                idx, = struct.unpack_from('>H', data, pos); pos += 2
+                self.cp[i] = ('Class', idx)
+            elif tag == 8:  # String
+                if pos + 2 > len(data): break
+                idx, = struct.unpack_from('>H', data, pos); pos += 2
+                self.cp[i] = ('String', idx)
+            elif tag in (9, 10, 11):  # Fieldref, Methodref, InterfaceMethodref
+                if pos + 4 > len(data): break
+                ref = struct.unpack_from('>HH', data, pos); pos += 4
+                self.cp[i] = ('Ref2', ref)
+            elif tag == 12:  # NameAndType
+                if pos + 4 > len(data): break
+                nat = struct.unpack_from('>HH', data, pos); pos += 4
+                self.cp[i] = ('NameAndType', nat)
+            elif tag in (15, 16):  # MethodHandle, MethodType
+                pos += 3 if tag == 15 else 2
+            elif tag in (17, 18):  # Dynamic, InvokeDynamic
+                if pos + 4 > len(data): break
+                bsm, nat_idx = struct.unpack_from('>HH', data, pos); pos += 4
+                self.cp[i] = ('InvokeDynamic', (bsm, nat_idx))
+            elif tag in (19, 20):  # Module, Package
+                pos += 2
+            i += 1
+
+        if pos + 8 > len(data): return
+        access, this_c, super_c, if_cnt = struct.unpack_from('>HHHH', data, pos)
+        pos += 8 + if_cnt * 2
+
+        this_entry = self.cp.get(this_c)
+        if this_entry and this_entry[0] == 'Class':
+            self.this_class = self.cp.get(this_entry[1], ('', ''))[1]
+        super_entry = self.cp.get(super_c)
+        if super_entry and super_entry[0] == 'Class':
+            self.super_class = self.cp.get(super_entry[1], ('', ''))[1]
+
+        if pos + 2 > len(data): return
+        f_cnt, = struct.unpack_from('>H', data, pos); pos += 2
+        for _ in range(f_cnt):
+            if pos + 8 > len(data): return
+            _, _, _, a_cnt = struct.unpack_from('>HHHH', data, pos); pos += 8
+            for _ in range(a_cnt):
+                if pos + 6 > len(data): return
+                _, a_len = struct.unpack_from('>HI', data, pos); pos += 6 + a_len
+
+        if pos + 2 > len(data): return
+        m_cnt, = struct.unpack_from('>H', data, pos); pos += 2
+        for _ in range(m_cnt):
+            if pos + 8 > len(data): return
+            _, m_name_idx, m_desc_idx, a_cnt = struct.unpack_from('>HHHH', data, pos); pos += 8
+            m_name = self.cp.get(m_name_idx, ('', ''))[1]
+            m_desc = self.cp.get(m_desc_idx, ('', ''))[1]
+            code = b''
+            for _ in range(a_cnt):
+                if pos + 6 > len(data): return
+                a_name_idx, a_len = struct.unpack_from('>HI', data, pos); pos += 6
+                a_name = self.cp.get(a_name_idx, ('', ''))[1]
+                if a_name == 'Code' and pos + 8 <= len(data):
+                    _, _, c_len = struct.unpack_from('>HHI', data, pos)
+                    code = data[pos+8:pos+8+c_len]
+                pos += a_len
+            self.methods[(m_name, m_desc)] = code
+
+        if pos + 2 > len(data): return
+        a_cnt, = struct.unpack_from('>H', data, pos); pos += 2
+        for _ in range(a_cnt):
+            if pos + 6 > len(data): return
+            a_name_idx, a_len = struct.unpack_from('>HI', data, pos); pos += 6
+            a_name = self.cp.get(a_name_idx, ('', ''))[1]
+            if a_name == 'BootstrapMethods' and pos + 2 <= len(data):
+                num_bsm, = struct.unpack_from('>H', data, pos)
+                bpos = pos + 2
+                for _ in range(num_bsm):
+                    if bpos + 4 > len(data): break
+                    m_ref, arg_cnt = struct.unpack_from('>HH', data, bpos); bpos += 4
+                    args = []
+                    for _ in range(arg_cnt):
+                        if bpos + 2 > len(data): break
+                        arg_idx, = struct.unpack_from('>H', data, bpos); bpos += 2
+                        entry = self.cp.get(arg_idx)
+                        resolved = self.cp.get(entry[1])[1] if entry and entry[0] in ('String', 'Class') else (entry[1] if entry else None)
+                        args.append(resolved)
+                    self.bootstrap_methods.append(args)
+            pos += a_len
+
+    def get_constant_string(self, idx: int) -> Optional[str]:
+        entry = self.cp.get(idx)
+        if entry:
+            if entry[0] == 'String':
+                utf = self.cp.get(entry[1])
+                return utf[1] if utf and utf[0] == 'Utf8' else None
+            elif entry[0] == 'Utf8':
+                return entry[1]
+        return None
+
+
 def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
     Extract DexKit 2.3.0 MethodMatcher criteria from a compiled *Fingerprint.class file
-    by safely inspecting the <init> constructor bytecode instructions.
+    by safely inspecting the <init> constructor bytecode instructions via AST operand stack evaluation.
     Distinguishes CONSTANT_Class from CONSTANT_String and removes compiler artifacts.
     """
-    if len(class_bytes) < 10:
-        return None
-    magic, minor, major, cp_count = struct.unpack_from('>IHHH', class_bytes, 0)
-    if magic != 0xCAFEBABE:
+    ast = ClassfileAst(class_bytes)
+    if not ast.cp:
         return None
 
-    pos = 10
-    cp: Dict[int, Tuple[str, Any]] = {}
-    i = 1
-    while i < cp_count:
-        if pos >= len(class_bytes):
+    # Find the <init> method bytecode
+    init_code = None
+    for (m_name, _), code in ast.methods.items():
+        if m_name == '<init>' and code:
+            init_code = code
             break
-        tag = class_bytes[pos]
-        pos += 1
-        if tag == 1:  # Utf8
-            if pos + 2 > len(class_bytes):
-                break
-            length, = struct.unpack_from('>H', class_bytes, pos)
-            pos += 2
-            val = class_bytes[pos:pos+length].decode('utf-8', errors='ignore')
-            cp[i] = ('Utf8', val)
-            pos += length
-        elif tag in (3, 4):  # Integer, Float
-            val, = struct.unpack_from('>I', class_bytes, pos)
-            pos += 4
-            cp[i] = ('Int' if tag == 3 else 'Float', val)
-        elif tag in (5, 6):  # Long, Double
-            val, = struct.unpack_from('>Q', class_bytes, pos)
-            pos += 8
-            cp[i] = ('Long' if tag == 5 else 'Double', val)
-            i += 1
-        elif tag == 7:  # Class
-            idx, = struct.unpack_from('>H', class_bytes, pos)
-            pos += 2
-            cp[i] = ('Class', idx)
-        elif tag == 8:  # String
-            idx, = struct.unpack_from('>H', class_bytes, pos)
-            pos += 2
-            cp[i] = ('String', idx)
-        elif tag in (9, 10, 11):  # Fieldref, Methodref, InterfaceMethodref
-            ref = struct.unpack_from('>HH', class_bytes, pos)
-            pos += 4
-            cp[i] = ('Ref2', ref)
-        elif tag == 12:  # NameAndType
-            nat = struct.unpack_from('>HH', class_bytes, pos)
-            pos += 4
-            cp[i] = ('NameAndType', nat)
-        elif tag in (15, 16, 17, 18, 19, 20):
-            pos += 3 if tag == 15 else 4 if tag in (17, 18) else 2
-        i += 1
-
-    if pos + 8 > len(class_bytes):
+    if not init_code:
         return None
-    access, this_c, super_c, if_cnt = struct.unpack_from('>HHHH', class_bytes, pos)
-    pos += 8 + if_cnt * 2
 
-    if pos + 2 > len(class_bytes):
-        return None
-    f_cnt, = struct.unpack_from('>H', class_bytes, pos)
-    pos += 2
-    for _ in range(f_cnt):
-        if pos + 8 > len(class_bytes):
-            return None
-        _, _, _, a_cnt = struct.unpack_from('>HHHH', class_bytes, pos)
-        pos += 8
-        for _ in range(a_cnt):
-            if pos + 6 > len(class_bytes):
-                return None
-            _, a_len = struct.unpack_from('>HI', class_bytes, pos)
-            pos += 6 + a_len
+    file_name = class_name.split("/")[-1].replace(".class", "")
+    is_constructor = (
+        "Constructor" in file_name
+        or file_name.endswith("ConstructorFingerprint")
+        or file_name.endswith("CtorFingerprint")
+        or "Ctor" in file_name
+    )
 
-    if pos + 2 > len(class_bytes):
-        return None
-    m_cnt, = struct.unpack_from('>H', class_bytes, pos)
-    pos += 2
-    init_code = b''
-    for _ in range(m_cnt):
-        if pos + 8 > len(class_bytes):
-            return None
-        _, m_name_idx, _, a_cnt = struct.unpack_from('>HHHH', class_bytes, pos)
-        pos += 8
-        m_name = cp.get(m_name_idx, ('', ''))[1]
-        for _ in range(a_cnt):
-            if pos + 6 > len(class_bytes):
-                return None
-            a_name_idx, a_len = struct.unpack_from('>HI', class_bytes, pos)
-            pos += 6
-            a_name = cp.get(a_name_idx, ('', ''))[1]
-            if a_name == 'Code' and m_name == '<init>':
-                if pos + 8 <= len(class_bytes):
-                    max_s, max_l, c_len = struct.unpack_from('>HHI', class_bytes, pos)
-                    init_code = class_bytes[pos+8:pos+8+c_len]
-            pos += a_len
-
-    # Parse instructions inside <init>
+    stack: List[Any] = []
     idx = 0
     instructions: List[Tuple[str, Any, Any]] = []
+
     while idx < len(init_code):
         op = init_code[idx]
-        if op == 0x12 and idx + 1 < len(init_code):
-            c_idx = init_code[idx+1]
-            idx += 2
-            val = cp.get(c_idx)
-            val_resolved = cp.get(val[1])[1] if val and val[0] in ('Class', 'String') else (val[1] if val else None)
-            instructions.append(('ldc', val[0] if val else None, val_resolved))
-        elif op == 0x13 and idx + 2 < len(init_code):
-            c_idx, = struct.unpack_from('>H', init_code, idx+1)
-            idx += 3
-            val = cp.get(c_idx)
-            val_resolved = cp.get(val[1])[1] if val and val[0] in ('Class', 'String') else (val[1] if val else None)
-            instructions.append(('ldc', val[0] if val else None, val_resolved))
-        elif op in (0xb8, 0xb7) and idx + 2 < len(init_code):
-            m_idx, = struct.unpack_from('>H', init_code, idx+1)
-            idx += 3
-            ref = cp.get(m_idx)
+        if op == 0x01:  # aconst_null
+            stack.append(None); idx += 1
+        elif op == 0x2a:  # aload_0 (this)
+            stack.append('this'); idx += 1
+        elif op in (0x12, 0x13):  # ldc, ldc_w
+            if op == 0x12:
+                if idx + 1 >= len(init_code): break
+                c_idx = init_code[idx+1]; idx += 2
+            else:
+                if idx + 2 >= len(init_code): break
+                c_idx, = struct.unpack_from('>H', init_code, idx+1); idx += 3
+            entry = ast.cp.get(c_idx)
+            val = None
+            if entry:
+                if entry[0] in ('Class', 'String'):
+                    val_utf = ast.cp.get(entry[1])
+                    val = val_utf[1] if val_utf else None
+                else:
+                    val = entry[1]
+            instructions.append(('ldc', entry[0] if entry else None, val))
+            stack.append(('ldc', entry[0] if entry else None, val))
+        elif op in (0x10, 0x11):  # bipush, sipush
+            if op == 0x10:
+                if idx + 1 >= len(init_code): break
+                v = struct.unpack_from('>b', init_code, idx+1)[0]; idx += 2
+            else:
+                if idx + 2 >= len(init_code): break
+                v = struct.unpack_from('>h', init_code, idx+1)[0]; idx += 3
+            instructions.append(('const_int', None, v))
+            stack.append(('const_int', None, v))
+        elif 0x02 <= op <= 0x08:  # iconst_m1 .. iconst_5
+            v = op - 0x03
+            instructions.append(('const_int', None, v))
+            stack.append(('const_int', None, v))
+            idx += 1
+        elif op in (0xb7, 0xb8):  # invokespecial, invokestatic
+            if idx + 2 >= len(init_code): break
+            m_idx, = struct.unpack_from('>H', init_code, idx+1); idx += 3
+            ref = ast.cp.get(m_idx)
             if ref and ref[0] == 'Ref2':
-                c_n = cp.get(cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
-                nat = cp.get(ref[1][1])
-                m_n = cp.get(nat[1][0], (None, ''))[1] if nat else ''
-                m_d = cp.get(nat[1][1], (None, ''))[1] if nat else ''
+                c_n = ast.cp.get(ast.cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
+                nat = ast.cp.get(ref[1][1])
+                m_n = ast.cp.get(nat[1][0], (None, ''))[1] if nat else ''
+                m_d = ast.cp.get(nat[1][1], (None, ''))[1] if nat else ''
                 instructions.append(('invoke', f'{c_n}->{m_n}{m_d}', None))
-        elif op == 0xbd and idx + 2 < len(init_code):
-            a_idx, = struct.unpack_from('>H', init_code, idx+1)
-            idx += 3
-            c_n = cp.get(cp.get(a_idx, (None, None))[1], (None, ''))[1]
+                if 'listOf' in m_n or 'emptyList' in m_n:
+                    if 'emptyList' in m_n:
+                        stack.append([])
+                    elif 'listOf' in m_n:
+                        if stack:
+                            top = stack.pop()
+                            if isinstance(top, list):
+                                stack.append(top)
+                            else:
+                                val = top[2] if isinstance(top, tuple) and len(top) > 2 else top
+                                stack.append([val] if val is not None else [])
+                        else:
+                            stack.append([])
+        elif op == 0xbd:  # anewarray
+            if idx + 2 >= len(init_code): break
+            a_idx, = struct.unpack_from('>H', init_code, idx+1); idx += 3
+            c_n = ast.cp.get(ast.cp.get(a_idx, (None, None))[1], (None, ''))[1]
             instructions.append(('anewarray', c_n, None))
         else:
             idx += 1
@@ -411,14 +513,6 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     in_array = False
     param_types: List[str] = []
     candidate_strings: List[str] = []
-
-    file_name = class_name.split("/")[-1].replace(".class", "")
-    is_constructor = (
-        "Constructor" in file_name
-        or file_name.endswith("ConstructorFingerprint")
-        or file_name.endswith("CtorFingerprint")
-        or "Ctor" in file_name
-    )
 
     for itype, const_tag, ival in instructions:
         if itype == 'anewarray':
@@ -463,29 +557,31 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                         if len(parts) == 2 and parts[1] == fp.get('method_name'):
                             fp['declaring_class_ends_with'] = parts[0]
                         elif (
-                            len(s_clean) > 2
+                            len(s_clean) >= 4
                             and not is_extension_package(s_clean)
                             and "Fingerprint" not in s_clean
                             and not any(ord(c) < 32 for c in s_clean)
-                            and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>')
+                            and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'true', 'false')
                         ):
                             candidate_strings.append(s_clean)
                     elif (
                         not is_constructor
                         and re.match(r'^[a-z_$][a-zA-Z0-9_$]*$', s_clean)
                         and s_clean not in (
-                            'this', '<this>', 'patchContext', 'patch', 'method', 'invoke', 'injected'
+                            'this', '<this>', 'patchContext', 'patch', 'method', 'invoke', 'injected', 'true', 'false'
                         )
                     ):
                         if 'method_name' not in fp and not s_clean.startswith("app"):
                             fp['method_name'] = s_clean
+                        elif len(s_clean) >= 4:
+                            candidate_strings.append(s_clean)
                     elif (
-                        len(s_clean) > 2
+                        len(s_clean) >= 4
                         and not is_extension_package(s_clean)
                         and "Fingerprint" not in s_clean
                         and not s_clean.endswith("(...)")
                         and not any(ord(c) < 32 for c in s_clean)
-                        and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>')
+                        and s_clean not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'true', 'false', 'invoke')
                     ):
                         candidate_strings.append(s_clean)
                 elif const_tag == 'Class' and isinstance(ival, str):
@@ -496,6 +592,11 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                 elif isinstance(ival, int) and 1000 < ival < 2000000000:
                     if 'literal' not in fp:
                         fp['literal'] = ival
+        elif itype == 'const_int':
+            ival = ival
+            if isinstance(ival, int) and 1000 < ival < 2000000000:
+                if 'literal' not in fp:
+                    fp['literal'] = ival
         elif itype == 'invoke':
             inv_target = const_tag or ""
             if in_array and 'listOf' in inv_target:
@@ -510,15 +611,38 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                                 param_types.append(ct)
                         elif (
                             tag == 'String'
-                            and len(x) > 2
+                            and len(x) >= 4
                             and not is_extension_package(x)
                             and "Fingerprint" not in x
                             and not x.endswith("(...)")
                             and not any(ord(c) < 32 for c in x)
-                            and x != "<init>"
+                            and x not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'true', 'false')
                         ):
                             candidate_strings.append(x)
                 pending_list = []
+
+    # Also harvest resolved lists from symbolic stack evaluation
+    for item in stack:
+        if isinstance(item, list):
+            for elem in item:
+                if isinstance(elem, str):
+                    s = elem.strip()
+                    if s.startswith('L') and s.endswith(';'):
+                        ct = clean_type(s)
+                        if ct and ct not in param_types:
+                            param_types.append(ct)
+                    elif s in ('V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C'):
+                        ct = clean_type(s)
+                        if ct and ct not in param_types:
+                            param_types.append(ct)
+                    elif (
+                        len(s) >= 4
+                        and not is_extension_package(s)
+                        and "Fingerprint" not in s
+                        and s not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'true', 'false')
+                    ):
+                        if s not in candidate_strings:
+                            candidate_strings.append(s)
 
     if is_constructor:
         fp['method_name'] = "<init>"
@@ -526,27 +650,17 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             fp['return_type'] = "void"
 
     if param_types:
-        # If param_types contains wildcard 'L', DexKit cannot load class 'L', so switch to param_count
         if any(p == 'L' for p in param_types):
             fp['param_count'] = len(param_types)
             fp['param_types'] = []
         else:
             fp['param_types'] = param_types
 
-    if candidate_strings:
-        candidate_strings = [s for s in candidate_strings if s != "<init>"]
-        if candidate_strings:
-            fp['strings'] = candidate_strings[:5]
-
-    # Check constant pool for companion Class.method hints if declaring class is not yet known
-    if 'declaring_class' not in fp and 'declaring_class_ends_with' not in fp and fp.get('method_name'):
-        m_name = fp['method_name']
-        for _, entry in cp.items():
-            if entry and entry[0] == 'Utf8' and isinstance(entry[1], str) and '.' in entry[1]:
-                parts = entry[1].split('.')
-                if len(parts) == 2 and parts[1] == m_name and is_valid_class_name(parts[0]):
-                    fp['declaring_class_ends_with'] = parts[0]
-                    break
+    # Discard non-discriminating strings
+    GENERIC_DISCRIMINATORS = {'this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'invoke', 'true', 'false', 'null'}
+    cleaned_strings = [s for s in candidate_strings if s not in GENERIC_DISCRIMINATORS and len(s) >= 4]
+    if cleaned_strings:
+        fp['strings'] = cleaned_strings[:5]
 
     # Clean overly broad or framework declaring classes
     declaring_cls = fp.get('declaring_class')
@@ -561,7 +675,6 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
 
     # CRITICAL GUARD: A fingerprint MUST have at least one specific discriminator
     # (method_name, non-empty strings, or a literal number).
-    # Declaring class alone is a wildcard query that matches ALL methods in that class.
     has_discriminator = bool(
         fp.get('method_name') or
         fp.get('strings') or
@@ -576,7 +689,6 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         "getView", "onClick", "onItemClick", "onBackPressed"
     }
 
-    # Strict guard: Common lifecycle or ubiquitous methods must NEVER be queried globally without class or strings!
     if (
         fp.get("method_name") in COMMON_METHODS
         and not fp.get("declaring_class")
@@ -677,13 +789,65 @@ def generate_hook_recipe_json(
                     p_dir = "/".join(pf.split("/")[:-1])
                     companion_classes = [n for n in names if n.startswith(p_dir + "/") and n.endswith(".class") and "$" not in n]
 
-                    # Read combined bytes for patch class and companion classes in same directory
+                    # Read bytes for patch class and companion classes in same directory
                     p_data = z.read(pf)
                     companion_data = [z.read(cf) for cf in companion_classes]
                     combined_bytes = p_data + b"".join(companion_data)
 
+                    # Parse patch class and companion classes via ClassfileAst
+                    patch_ast = ClassfileAst(p_data)
+                    comp_asts = [ClassfileAst(cd) for cd in companion_data]
+                    all_asts = [patch_ast] + comp_asts
+
                     p_strings, _, _ = parse_jvm_class(p_data)
                     patch_name = next((s for s in p_strings if 3 < len(s) < 40 and not s.startswith("L") and not s.startswith("$") and " " in s), "")
+
+                    # Extract all BSM templates and direct AST fingerprint bindings
+                    ast_fp_bindings: Dict[str, Tuple[str, str]] = {}
+                    for c_ast in all_asts:
+                        bsms = c_ast.bootstrap_methods
+                        for (m_name, _), code in c_ast.methods.items():
+                            if not code:
+                                continue
+                            idx = 0
+                            last_fp_name = None
+                            while idx < len(code):
+                                op = code[idx]
+                                if op == 0xb2 and idx + 2 < len(code):  # getstatic
+                                    f_idx, = struct.unpack_from('>H', code, idx+1); idx += 3
+                                    ref = c_ast.cp.get(f_idx)
+                                    if ref and ref[0] == 'Ref2':
+                                        c_n = c_ast.cp.get(c_ast.cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
+                                        if 'Fingerprint' in c_n:
+                                            last_fp_name = c_n.split('/')[-1].replace('Fingerprint', '')
+                                elif op == 0xba and idx + 4 < len(code):  # invokedynamic
+                                    id_idx, = struct.unpack_from('>H', code, idx+1); idx += 5
+                                    entry = c_ast.cp.get(id_idx)
+                                    if entry and entry[0] == 'InvokeDynamic':
+                                        bsm_idx = entry[1][0]
+                                        if bsm_idx < len(bsms):
+                                            bsm_args = bsms[bsm_idx]
+                                            for b_arg in bsm_args:
+                                                if isinstance(b_arg, str) and 'invoke-static' in b_arg:
+                                                    ext_match = re.search(r'([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', b_arg)
+                                                    if ext_match and last_fp_name:
+                                                        ext_str = ext_match.group(1).lstrip('L').rstrip(';')
+                                                        ast_fp_bindings[last_fp_name] = (ext_str, b_arg)
+                                elif op in (0xb7, 0xb8) and idx + 2 < len(code):  # invokespecial, invokestatic
+                                    m_idx, = struct.unpack_from('>H', code, idx+1); idx += 3
+                                    ref = c_ast.cp.get(m_idx)
+                                    if ref and ref[0] == 'Ref2':
+                                        c_n = c_ast.cp.get(c_ast.cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
+                                        nat = c_ast.cp.get(ref[1][1])
+                                        m_n = nat[0] if nat else ''
+                                        m_d = nat[1] if nat else ''
+                                        m_name_str = c_ast.cp.get(m_n, ('', ''))[1] if isinstance(m_n, int) else ''
+                                        m_desc_str = c_ast.cp.get(m_d, ('', ''))[1] if isinstance(m_d, int) else ''
+                                        if is_extension_package(c_n) and last_fp_name:
+                                            ext_str = f"{c_n}->{m_name_str}{m_desc_str}".lstrip('L').rstrip(';')
+                                            ast_fp_bindings[last_fp_name] = (ext_str, "")
+                                else:
+                                    idx += 1
 
                     # Discover all fingerprints referenced in this patch or its companion classes
                     fp_matches = re.findall(rb'(?:L)?(app/[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint)', combined_bytes)
@@ -761,16 +925,23 @@ def generate_hook_recipe_json(
                             if not ('ActivityHook' in e and 'initialize' in e and 'MainActivity' in target_cls)
                         ] or ext_calls
 
-                        # Match to best extension call by token overlap
+                        # 1. Check exact AST binding first
                         best_ext = None
-                        if available_ext_calls:
+                        smali_ctx = all_text
+                        if fp_name in ast_fp_bindings:
+                            best_ext, smali_ctx = ast_fp_bindings[fp_name]
+                        elif fp_simple in ast_fp_bindings:
+                            best_ext, smali_ctx = ast_fp_bindings[fp_simple]
+
+                        # 2. Match to best extension call by token overlap in available calls
+                        if not best_ext and available_ext_calls:
                             words = [w for w in re.split(r'[^a-z0-9]', re.sub(r'([a-z])([A-Z])', r'\1 \2', fp_name).lower()) if len(w) > 3]
                             for ext in available_ext_calls:
                                 mtd = ext.split("->")[1].split("(")[0].lower()
                                 if any(w in mtd for w in words) or mtd in fp_name.lower() or fp_name.lower() in mtd:
                                     best_ext = ext
                                     break
-                            if not best_ext:
+                            if not best_ext and len(available_ext_calls) == 1:
                                 best_ext = available_ext_calls[0]
 
                         if not best_ext:
@@ -788,10 +959,27 @@ def generate_hook_recipe_json(
 
                         action = classify_action_from_signature(
                             best_ext,
-                            all_text,
+                            smali_ctx,
                             target_method=target_mtd,
                             target_return=fp_def.get('return_type', '')
                         )
+
+                        # CRITICAL SAFETY GUARD:
+                        # An unconstrained query (*#* with no method and no strong strings)
+                        # must NEVER be mapped as RETURN_TRANSFORM or REPLACE!
+                        is_unconstrained = not target_cls and not target_mtd
+                        if is_unconstrained and action in ("RETURN_TRANSFORM", "REPLACE", "METHOD_REPLACE"):
+                            valid_strings = [s for s in fp_def.get('strings', []) if len(s) >= 6]
+                            if not valid_strings:
+                                continue
+                            action = "AFTER"
+
+                        # Guard against type mismatch in RETURN_TRANSFORM
+                        target_ret = clean_type(fp_def.get('return_type', ''))
+                        ext_ret = clean_type(best_ext.split(')')[-1]) if ')' in best_ext else ''
+                        if action == "RETURN_TRANSFORM" and target_ret and ext_ret:
+                            if target_ret != ext_ret and target_ret in ("boolean", "int", "void", "long", "float", "double"):
+                                action = "AFTER"
 
                         ext_class = clean_type(best_ext.split("->")[0]) if "->" in best_ext else None
                         ext_method = best_ext.split("->")[1].split("(")[0].strip() if "->" in best_ext else None

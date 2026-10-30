@@ -1,7 +1,7 @@
 ---
-context_version: 1.0.7
+context_version: 1.0.8
 synced_commit: HEAD
-synced_at: "2026-10-30T18:50:00Z"
+synced_at: "2026-10-30T20:40:00Z"
 ---
 
 # Project Context: codexmorphe-builder
