@@ -2,16 +2,14 @@ import argparse
 import shutil
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from .assembler.aapt_compiler import compile_resources
 from .assembler.apk_packager import assemble_bundle_apk
-from .assembler.d8_merger import merge_dex_files
 from .assembler.manifest_gen import BundleManifestGenerator
 from .config import BUILD_TMP_DIR, CACHE_DIR, LEDGER_FILE, MPP_CACHE_DIR, OUTPUT_DIR, SOURCES_DIR, get_toolchain_status
 from .fetcher.cache_ledger import CacheLedger
 from .fetcher.release_client import ReleaseClient
-from .fetcher.source_model import SourceDescriptor, load_all_sources
+from .fetcher.source_model import load_all_sources
 from .filter.root_filter import filter_redundant_patches
 from .parser.compatibility import discover_compatible_apps
 from .parser.mpp_archive import MppArchive

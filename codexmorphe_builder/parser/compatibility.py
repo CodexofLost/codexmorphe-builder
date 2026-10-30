@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import Dict, List
 from .mpp_archive import MppArchive
 
 

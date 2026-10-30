@@ -1,7 +1,6 @@
 import unittest
-from pathlib import Path
 from codexmorphe_builder.config import SOURCES_DIR
-from codexmorphe_builder.fetcher.source_model import load_all_sources, SourceDescriptor
+from codexmorphe_builder.fetcher.source_model import load_all_sources
 
 
 class TestSourceModel(unittest.TestCase):

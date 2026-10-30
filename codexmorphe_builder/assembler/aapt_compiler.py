@@ -1,7 +1,7 @@
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
+from typing import Optional, Set, Tuple
 from ..config import AAPT2_BIN, ANDROID_JAR
 
 

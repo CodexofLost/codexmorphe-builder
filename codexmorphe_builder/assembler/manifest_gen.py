@@ -2,18 +2,9 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from ..config import RELEASE_REPO, RELEASE_TAG
 from .apk_packager import compute_sha256
-
-
-@dataclass
-class PatchCatalogItem:
-    id: str
-    name: str
-    description: str
-    default: bool
-    key: str
 
 
 @dataclass

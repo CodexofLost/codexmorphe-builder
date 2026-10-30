@@ -6,9 +6,9 @@ import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
-from .cache_ledger import CacheLedger, LedgerEntry
+from .cache_ledger import CacheLedger
 from .source_model import SourceDescriptor
 
 

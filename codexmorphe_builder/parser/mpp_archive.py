@@ -2,7 +2,7 @@ import struct
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import List
 
 
 @dataclass
@@ -32,13 +32,6 @@ class MppArchive:
             extension_files=extensions,
             resource_files=resources
         )
-
-    def extract_file(self, internal_path: str, dest_path: Path) -> Path:
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(self.path, "r") as z:
-            with open(dest_path, "wb") as out:
-                out.write(z.read(internal_path))
-        return dest_path
 
     def extract_extensions_for_app(self, app_tag: str, dest_dir: Path) -> List[Path]:
         """
