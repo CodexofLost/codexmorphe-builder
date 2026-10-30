@@ -41,8 +41,15 @@ class TestRecipeBuilder(unittest.TestCase):
         res = generate_hook_recipe_json("com.instagram.android", app_info, archive=archive)
         data = json.loads(res)
         self.assertEqual(data["package_name"], "com.instagram.android")
-        self.assertTrue(len(data["hooks"]) > 0)
-        # Verify that fingerprints contain valid fields
+        self.assertTrue(len(data["hooks"]) >= 200)
+        self.assertTrue(len(data["entrypoints"]) > 0)
+        # Verify no hooks contain compiler paths or extension classes
+        for h in data["hooks"]:
+            fp = h.get("fingerprint", {})
+            dc = fp.get("declaring_class", "")
+            self.assertFalse(dc.startswith("app.morphe") or dc.startswith("app.hushgram"))
+            for s in fp.get("strings", []):
+                self.assertFalse("Fingerprint" in s or "app/morphe" in s or "app/hushgram" in s)
         first_hook = data["hooks"][0]
         self.assertIn("id", first_hook)
         self.assertIn("action", first_hook)
