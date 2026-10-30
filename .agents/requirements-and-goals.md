@@ -28,8 +28,8 @@ Resolve critical integration failures across the two-project framework:
 
 | ID | Component | Defect / Failure Mode | Root Cause | Target Fix | Status |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **RC-1** | `codexmorphe-builder` | YouTube crash (NPE in `aiat.e()`), Instagram flooded with `Type mismatch in RETURN_TRANSFORM` | Path B emitted hooks with `declaring_class` but null `method_name` & empty `strings`. DexKit matched all methods in class. | Reject/constrain rules lacking `method_name`, unique `strings`, or `param_types`. | 🟡 IN PROGRESS |
-| **RC-2** | `codexmorphe-builder` | Constructor hooks fail to match DexKit query | Fingerprints ending in `Constructor` left `method_name` as null instead of `"<init>"`. | Explicitly assign `method_name: "<init>"` for constructor fingerprints. | 🟡 IN PROGRESS |
+| **RC-1** | `codexmorphe-builder` | YouTube crash (NPE in `aiat.e()`), Instagram flooded with `Type mismatch in RETURN_TRANSFORM` | Path B emitted hooks with `declaring_class` but null `method_name` & empty `strings`. DexKit matched all methods in class. | Reject/constrain rules lacking `method_name`, unique `strings`, or `param_types`. | ✅ RESOLVED |
+| **RC-2** | `codexmorphe-builder` | Constructor hooks fail to match DexKit query | Fingerprints ending in `Constructor` left `method_name` as null instead of `"<init>"`. | Explicitly assign `method_name: "<init>"` for constructor fingerprints. | ✅ RESOLVED |
 | **RC-3** | `CodexMorphe` | Activities throw `ResourceNotFoundException` or show stock UI | `BundleResourceInjector` only injected into `Application.resources`. Activity contexts hold separate `Resources`. | Hook `registerActivityLifecycleCallbacks` on `app` to call `addModuleAssets` on `onActivityCreated` & `onActivityResumed`. | ⏳ PENDING |
 | **RC-4** | `CodexMorphe` | 10–20s launch freeze / ANR risk on app boot | Main-thread DexKit re-scanning hundreds of methods during `Application.onCreate`. | Implement `DexKitCacheBridge` backed by SharedPreferences keyed by package & `versionCode`. | ⏳ PENDING |
 | **RC-5** | `CodexMorphe` | Morphe settings/layouts cannot look up host resource IDs | `ResourceUtils.fallbackPackageName` uninitialized. | Dynamically set `fallbackPackageName = app.packageName` via reflection on bundle attach. | ⏳ PENDING |
@@ -38,23 +38,24 @@ Resolve critical integration failures across the two-project framework:
 
 ## 4. Phase Breakdown & Execution Milestones
 
-- [ ] **Phase 0: Requirements Tracker Artifact**
+- [x] **Phase 0: Requirements Tracker Artifact**
   - [x] Create `.agents/requirements-and-goals.md`
-- [ ] **Phase 1: Fix `codexmorphe-builder`**
-  - [ ] Inspect upstream `.mpp` files directly
-  - [ ] Harden `recipe_builder.py` against wildcard hooks
-  - [ ] Ensure constructor fingerprints assign `"<init>"`
-  - [ ] Extract exact parameters and return types
-  - [ ] Run unit tests (`test_recipe_builder.py`, `test_ast_transpiler.py`)
-- [ ] **Phase 2: Commit, Push, and Rolling Release Gate**
-  - [ ] Commit builder changes & push to `origin/main`
-  - [ ] Monitor GitHub Actions `build-bundles.yml`
-  - [ ] 🛑 **CRITICAL USER GATE**: User taps "Fetch / Update Bundles" in CodexMorphe
-- [ ] **Phase 3: Harden `CodexMorphe` Client Engine**
-  - [ ] Activity-level resource injection via `ActivityLifecycleCallbacks`
-  - [ ] DexKit query guard & discriminator safety
-  - [ ] DexKit signature caching (`DexKitCacheBridge`)
-  - [ ] Initialize `ResourceUtils.fallbackPackageName`
+- [x] **Phase 1: Fix `codexmorphe-builder`**
+  - [x] Inspect upstream `.mpp` files directly
+  - [x] Harden `recipe_builder.py` against wildcard hooks
+  - [x] Ensure constructor fingerprints assign `"<init>"`
+  - [x] Extract exact parameters and return types
+  - [x] Run unit tests (`test_recipe_builder.py`, `test_ast_transpiler.py` - 14/14 passed)
+- [x] **Phase 2: Commit, Push, and Rolling Release Gate**
+  - [x] Commit builder changes & push to `origin/main` (commit `13a8f5c`)
+  - [x] Monitor GitHub Actions `build-bundles.yml` (Run #41074105016 succeeded in 8m15s)
+  - [x] 🛑 **CRITICAL USER GATE**: User tapped "Fetch / Update Bundles" in CodexMorphe (Completed)
+- [ ] **Phase 3: Harden `CodexMorphe` Client Engine & Absolute Decoupling**
+  - [ ] Remove all hardcoded author package names (`app.hushgram`, `app.piko`, etc.) across `BundleBridge.kt`, `DexKitHookDispatcher.kt`, and `ExtensionClassLoading.kt`
+  - [ ] Dynamic entrypoint and resource fallback resolution via `manifest.entrypoints` and `manifest.resourceFallbacks`
+  - [ ] Activity-level resource injection via `ActivityLifecycleCallbacks` (`onActivityCreated`, `onActivityResumed`)
+  - [ ] DexKit query guard & discriminator safety (reject unconstrained class matching)
+  - [ ] DexKit signature caching (`DexKitCacheBridge` / SharedPreferences keyed by package & `versionCode`)
   - [ ] Prompt user for build choice (Local `fast-gradlew` vs Cloud CI/CD) and compile
 - [ ] **Phase 4: Verification & Live Diagnostics**
   - [ ] Install updated `CodexMorphe` APK via `adb` or `rish`

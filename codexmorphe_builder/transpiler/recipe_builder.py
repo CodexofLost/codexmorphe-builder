@@ -127,12 +127,13 @@ def is_valid_class_name(name: str) -> bool:
 
 def is_extension_package(name: str) -> bool:
     """Return True if class or path belongs to an extension/patcher package rather than the host app."""
-    return any(name.startswith(p) for p in (
-        "app.morphe.", "app.hushgram.", "app.piko.", "app.crimera.",
-        "app.rushiranpise.", "app.devanced.", "app.okish.",
-        "app/morphe/", "app/hushgram/", "app/piko/", "app/crimera/",
-        "app/rushiranpise/", "app/devanced/", "app/okish/", "Lapp/"
-    ))
+    clean = name.lstrip("L").replace("/", ".")
+    return (
+        clean.startswith("app.") or
+        ".extension." in clean or
+        clean.startswith("morphe.") or
+        "patches" in clean
+    )
 
 
 def parse_jvm_class(data: bytes) -> Tuple[List[str], List[str], List[int]]:
@@ -199,17 +200,19 @@ def discover_extension_entrypoints(
     extracted_mpe: Optional[List[Path]] = None,
     archive: Optional[MppArchive] = None,
     app_tag: str = ""
-) -> List[str]:
+) -> Tuple[List[str], List[str]]:
     """
-    Auto-discover extension lifecycle initializers from extracted extension .mpe/.dex files
-    or directly from the .mpp archive container.
+    Auto-discover extension lifecycle initializers and ResourceUtils classes from extracted
+    extension .mpe/.dex files or directly from the .mpp archive container.
     """
     entrypoints: List[str] = []
+    resource_fallbacks: List[str] = []
     seen = set()
+    seen_rf = set()
 
     def scan_dex_bytes(data: bytes):
         if b'SettingsEntry' in data:
-            matches = re.findall(rb'L(app/[a-zA-Z0-9_/]+/SettingsEntry);', data)
+            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/SettingsEntry);', data)
             for m in set(matches):
                 cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
                 ep = f"{cls_name}#onApplicationCreate"
@@ -218,7 +221,7 @@ def discover_extension_entrypoints(
                     entrypoints.append(ep)
 
         if b'AddOnApi' in data:
-            matches = re.findall(rb'L(app/[a-zA-Z0-9_/]+/AddOnApi);', data)
+            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/AddOnApi);', data)
             for m in set(matches):
                 cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
                 ep = f"{cls_name}#initialize"
@@ -227,13 +230,21 @@ def discover_extension_entrypoints(
                     entrypoints.append(ep)
 
         if b'Utils' in data:
-            matches = re.findall(rb'L(app/[a-zA-Z0-9_/]+/Utils);', data)
+            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/Utils);', data)
             for m in set(matches):
                 cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
                 ep = f"{cls_name}#setContext"
                 if ep not in seen:
                     seen.add(ep)
                     entrypoints.append(ep)
+
+        if b'ResourceUtils' in data:
+            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/ResourceUtils);', data)
+            for m in set(matches):
+                cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
+                if cls_name not in seen_rf:
+                    seen_rf.add(cls_name)
+                    resource_fallbacks.append(cls_name)
 
     if extracted_mpe:
         for dex_path in extracted_mpe:
@@ -243,7 +254,7 @@ def discover_extension_entrypoints(
                 except Exception:
                     pass
 
-    if not entrypoints and archive and Path(archive.path).exists():
+    if (not entrypoints or not resource_fallbacks) and archive and Path(archive.path).exists():
         try:
             with zipfile.ZipFile(Path(archive.path), "r") as z:
                 for n in z.namelist():
@@ -255,7 +266,7 @@ def discover_extension_entrypoints(
         except Exception:
             pass
 
-    return entrypoints
+    return entrypoints, resource_fallbacks
 
 
 def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dict[str, Any]]:
@@ -570,8 +581,8 @@ def generate_hook_recipe_json(
     seen_target_exts: Set[Tuple[str, str, str]] = set()
     seen_activity_init = False
 
-    # 1. Discover extension entrypoints
-    entrypoints = discover_extension_entrypoints(extracted_mpe, archive, app_tag=app_info.app_tag)
+    # 1. Discover extension entrypoints & resource fallbacks
+    entrypoints, resource_fallbacks = discover_extension_entrypoints(extracted_mpe, archive, app_tag=app_info.app_tag)
 
     # 2. Extract hook recipes from .mpp archive if provided
     if archive and archive.path.exists():
@@ -849,6 +860,7 @@ def generate_hook_recipe_json(
         "version": 1,
         "package_name": pkg,
         "entrypoints": entrypoints,
+        "resource_fallbacks": resource_fallbacks,
         "hooks": hooks
     }
 

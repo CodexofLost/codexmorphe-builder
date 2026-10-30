@@ -46,6 +46,8 @@ class TestRecipeBuilder(unittest.TestCase):
         self.assertEqual(data["package_name"], "com.instagram.android")
         self.assertTrue(len(data["hooks"]) > 100)
         self.assertTrue(len(data["entrypoints"]) > 0)
+        self.assertIn("resource_fallbacks", data)
+        self.assertTrue(any("ResourceUtils" in rf for rf in data["resource_fallbacks"]))
 
         for h in data["hooks"]:
             fp = h.get("fingerprint", {})
