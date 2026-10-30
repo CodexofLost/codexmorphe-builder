@@ -15,6 +15,7 @@ from .fetcher.source_model import SourceDescriptor, load_all_sources
 from .filter.root_filter import filter_redundant_patches
 from .parser.compatibility import discover_compatible_apps
 from .parser.mpp_archive import MppArchive
+from .transpiler.recipe_builder import generate_hook_recipe_json
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -138,12 +139,13 @@ def cmd_build(args: argparse.Namespace) -> None:
             else:
                 print("    [INFO] No binary resources compiled for this target.")
 
-            # Step 3: Package bundle APK as standard MultiDex + Compiled Resources
+            # Step 3: Package bundle APK as standard MultiDex + Compiled Resources + Dynamic Hook Recipes
+            hooks_json_str = generate_hook_recipe_json(pkg, app_info)
             bundle_filename = f"{pkg}-{src.id}-bundle.apk"
             output_bundle_apk = OUTPUT_DIR / bundle_filename
-            assemble_bundle_apk(extracted_mpe, resources_apk, output_bundle_apk)
+            assemble_bundle_apk(extracted_mpe, resources_apk, output_bundle_apk, hooks_data=hooks_json_str)
             total_compiled_bundles += 1
-            print(f"    ✓ Emitted MultiDex bundle: {bundle_filename} ({output_bundle_apk.stat().st_size // 1024} KB)")
+            print(f"    ✓ Emitted MultiDex bundle (with hooks.json): {bundle_filename} ({output_bundle_apk.stat().st_size // 1024} KB)")
 
             # Prepare patch metadata catalog for active patches
             active_patches_meta = []

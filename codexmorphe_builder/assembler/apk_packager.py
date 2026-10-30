@@ -7,11 +7,14 @@ from typing import List, Optional
 def assemble_bundle_apk(
     dex_files: List[Path],
     resources_apk: Optional[Path],
-    output_apk: Path
+    output_apk: Path,
+    hooks_data: Optional[str] = None,
+    hooks_file: Optional[Path] = None
 ) -> Path:
     """
     Assemble the final <packageName>-<source>-bundle.apk package using standard Android MultiDex.
     Packages extracted .mpe DEX files as classes.dex, classes2.dex, classes3.dex...
+    Embeds hooks.json if provided so the client engine can execute patch recipes dynamically.
     """
     output_apk.parent.mkdir(parents=True, exist_ok=True)
 
@@ -29,6 +32,12 @@ def assemble_bundle_apk(
                     if not item.filename.startswith("classes") or not item.filename.endswith(".dex"):
                         data = res_zip.read(item.filename)
                         apk.writestr(item.filename, data)
+
+        # 3. Add dynamic hook recipes container (hooks.json)
+        if hooks_data:
+            apk.writestr("hooks.json", hooks_data)
+        elif hooks_file and hooks_file.exists():
+            apk.write(hooks_file, arcname="hooks.json")
 
     return output_apk
 
