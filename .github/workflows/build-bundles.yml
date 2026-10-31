@@ -165,4 +165,10 @@ jobs:
               upload_asset "dist/bundle-manifest.json"
             fi
           fi
+
+          # 5. Purge obsolete and orphaned assets not present in the published manifest
+          if [ -f "dist/bundle-manifest.json" ]; then
+            echo "Purging obsolete/orphaned assets from 'bundles' release..."
+            python3 scripts/purge_orphaned_assets.py || true
+          fi
           echo "✓ Rolling release update complete."

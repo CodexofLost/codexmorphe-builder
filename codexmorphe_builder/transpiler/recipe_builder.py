@@ -148,59 +148,16 @@ def is_extension_package(name: str) -> bool:
 def parse_jvm_class(data: bytes) -> Tuple[List[str], List[str], List[int]]:
     """
     Parse a compiled JVM .class file binary to extract string constants,
-    Utf8 symbols, and integer literals from the constant pool.
+    Utf8 symbols, and integer literals from the constant pool via ClassfileAst.
     """
-    if len(data) < 10:
-        return [], [], []
-
-    magic, minor, major, cp_count = struct.unpack_from('>IHHH', data, 0)
-    if magic != 0xCAFEBABE:
-        return [], [], []
-
-    pos = 10
-    cp: Dict[int, Tuple[str, Any]] = {}
-    i = 1
-    while i < cp_count:
-        if pos >= len(data):
-            break
-        tag = data[pos]
-        pos += 1
-        if tag == 1:  # Utf8
-            if pos + 2 > len(data):
-                break
-            length, = struct.unpack_from('>H', data, pos)
-            pos += 2
-            val = data[pos:pos+length].decode('utf-8', errors='ignore')
-            cp[i] = ('Utf8', val)
-            pos += length
-        elif tag in (3, 4):  # Integer, Float
-            val, = struct.unpack_from('>I', data, pos)
-            pos += 4
-            cp[i] = ('Int' if tag == 3 else 'Float', val)
-        elif tag in (5, 6):  # Long, Double
-            val, = struct.unpack_from('>Q', data, pos)
-            pos += 8
-            cp[i] = ('Long' if tag == 5 else 'Double', val)
-            i += 1  # 8-byte constants take two entries
-        elif tag == 7:  # Class
-            idx, = struct.unpack_from('>H', data, pos)
-            pos += 2
-            cp[i] = ('Class', idx)
-        elif tag == 8:  # String
-            idx, = struct.unpack_from('>H', data, pos)
-            pos += 2
-            cp[i] = ('String', idx)
-        elif tag in (9, 10, 11, 12, 17, 18):  # Fieldref, Methodref, InterfaceMethodref, NameAndType, Dynamic, InvokeDynamic
-            a, b = struct.unpack_from('>HH', data, pos)
-            pos += 4
-            cp[i] = ('Ref', (a, b))
-        elif tag in (15, 16, 19, 20):  # MethodHandle, MethodType, Module, Package
-            pos += 3 if tag == 15 else 2
-        i += 1
-
-    strings = [cp[v[1]][1] for k, v in cp.items() if v[0] == 'String' and v[1] in cp and cp[v[1]][0] == 'Utf8']
-    utf8s = [v[1] for k, v in cp.items() if v[0] == 'Utf8']
-    ints = [v[1] for k, v in cp.items() if v[0] == 'Int']
+    ast = ClassfileAst(data)
+    strings = [
+        ast.cp[v[1]][1]
+        for v in ast.cp.values()
+        if v[0] == 'String' and v[1] in ast.cp and ast.cp[v[1]][0] == 'Utf8'
+    ]
+    utf8s = [v[1] for v in ast.cp.values() if v[0] == 'Utf8']
+    ints = [v[1] for v in ast.cp.values() if v[0] == 'Int']
 
     return strings, utf8s, ints
 
