@@ -36,30 +36,34 @@ class MppArchive:
     def extract_extensions_for_app(self, app_tag: str, dest_dir: Path) -> List[Path]:
         """
         Extract extensions following official Morphe specifications:
-        1. Universal Shared Containers: 'shared.mpe', 'extension.mpe', 'shared-extension.mpe', 'shared-gmscore.mpe'.
-        2. Single-Extension Repositories: If an archive contains only 1 extension, it serves all apps in the bundle.
-        3. Multi-App Domain Matching: Matches <app_tag>.mpe, shared-<app_tag>.mpe, or domain tags.
+        1. Universal Shared Containers: 'extensions/all/*.mpe', 'shared.mpe', 'extension.mpe',
+           'shared-extension.mpe', 'shared-gmscore.mpe'.
+        2. App-Family Shared Containers: 'shared-youtube.mpe' for YouTube and YouTube Music.
+        3. Single-Extension Repositories: If an archive contains only 1 non-shared extension,
+           it serves all apps in the bundle.
+        4. Strict Multi-App Domain Matching: Matches <app_tag>.mpe or shared-<app_tag>.mpe.
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
         extracted = []
 
         shared_stems = {"shared", "shared-extension", "shared-gmscore", "extension"}
-        non_shared_exts = [f for f in self.extension_files if Path(f).stem not in shared_stems]
+        non_shared_exts = [f for f in self.extension_files if Path(f).stem not in shared_stems and not f.startswith("extensions/all/")]
 
         with zipfile.ZipFile(self.path, "r") as z:
             for ext in self.extension_files:
                 ext_name = Path(ext).stem
 
+                is_all_ext = ext.startswith("extensions/all/") or "/all/" in ext
                 is_shared_base = ext_name in shared_stems
+                is_shared_youtube = (app_tag in ("youtube", "music") and ext_name == "shared-youtube")
                 is_sole_app_ext = len(non_shared_exts) == 1 and len(self.extension_files) == 1
                 is_app_match = (
                     ext_name == app_tag
                     or ext_name == f"shared-{app_tag}"
                     or ext_name.endswith(f"-{app_tag}")
-                    or (app_tag in ext_name and len(app_tag) > 3)
                 )
 
-                if is_shared_base or is_sole_app_ext or is_app_match:
+                if is_all_ext or is_shared_base or is_shared_youtube or is_sole_app_ext or is_app_match:
                     out_path = dest_dir / f"{ext_name}.dex"
                     with open(out_path, "wb") as out:
                         out.write(z.read(ext))
@@ -75,7 +79,7 @@ class MppArchive:
         import re
 
         dest_res_dir.mkdir(parents=True, exist_ok=True)
-        allowed_targets = {"shared", app_tag, f"shared-{app_tag}"}
+        allowed_targets = {"shared", "all", app_tag, f"shared-{app_tag}"}
         if app_tag in ("youtube", "music"):
             allowed_targets.add("sponsorblock")
             allowed_targets.add("shared-youtube")

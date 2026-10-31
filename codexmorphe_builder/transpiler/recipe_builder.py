@@ -126,14 +126,15 @@ def is_valid_class_name(name: str) -> bool:
 
 
 def is_extension_package(name: str) -> bool:
-    """Return True if class or path belongs to an extension/patcher package rather than the host app."""
+    """Return True if class or path belongs to a runtime extension package rather than the host app or patcher."""
     clean = name.lstrip("L").replace("/", ".")
-    return (
-        clean.startswith("app.") or
-        ".extension." in clean or
-        clean.startswith("morphe.") or
-        "patches" in clean
-    )
+    if clean.startswith((
+        "app.morphe.patches.", "app.morphe.patcher.", "app.morphe.util.",
+        "app.hushgram.patches.", "app.hushgram.patcher.", "app.hushgram.util.",
+        "app.revanced.patches.", "app.revanced.patcher.", "app.revanced.util."
+    )):
+        return False
+    return ".extension." in clean or clean.endswith(".extension") or ".extension" in clean
 
 
 def parse_jvm_class(data: bytes) -> Tuple[List[str], List[str], List[int]]:
@@ -241,7 +242,7 @@ def discover_extension_entrypoints(
                     entrypoints.append(ep)
 
         if b'ResourceUtils' in data:
-            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/ResourceUtils);', data)
+            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/ResourceUtils(?:Kt)?);', data)
             for m in set(matches):
                 cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
                 if cls_name not in seen_rf:
@@ -703,8 +704,8 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
 
 def classify_action_from_signature(ext_call: str, smali_text: str = "", target_method: str = "", target_return: str = "") -> str:
     """Classify LibXposed hook action based on extension method descriptor and bytecode."""
-    # Critical invariant: Android lifecycle methods must ALWAYS run AFTER
-    if target_method in ("onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart", "onPause", "onStop", "onDestroy"):
+    # Critical invariant: Constructors and Android lifecycle methods must ALWAYS run AFTER
+    if target_method == "<init>" or target_method in ("onCreate", "onActivityCreated", "attachBaseContext", "onResume", "onStart", "onPause", "onStop", "onDestroy"):
         return "AFTER"
     if "onCreate" in ext_call or "attachBaseContext" in ext_call:
         return "AFTER"
@@ -719,12 +720,11 @@ def classify_action_from_signature(ext_call: str, smali_text: str = "", target_m
     if ret_part == "V":
         return "AFTER"
 
-    # Check for return type mismatch with primitive targets
+    # Check for return type mismatch with primitive targets or void targets
     ext_clean = clean_type(ret_part)
     target_clean = clean_type(target_return) if target_return else ""
-    if target_clean and ext_clean != target_clean:
-        if target_clean in ("boolean", "int", "void", "long", "float", "double"):
-            return "AFTER"
+    if target_clean in ("void", "V", "") or (target_clean and ext_clean != target_clean and target_clean in ("boolean", "int", "long", "float", "double")):
+        return "AFTER"
 
     return "RETURN_TRANSFORM"
 
@@ -811,6 +811,7 @@ def generate_hook_recipe_json(
                                 continue
                             idx = 0
                             last_fp_name = None
+                            last_ldc_strings: List[str] = []
                             while idx < len(code):
                                 op = code[idx]
                                 if op == 0xb2 and idx + 2 < len(code):  # getstatic
@@ -820,6 +821,34 @@ def generate_hook_recipe_json(
                                         c_n = c_ast.cp.get(c_ast.cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
                                         if 'Fingerprint' in c_n:
                                             last_fp_name = c_n.split('/')[-1].replace('Fingerprint', '')
+                                elif op == 0x12 and idx + 1 < len(code):  # ldc
+                                    s_idx = code[idx+1]; idx += 2
+                                    s_entry = c_ast.cp.get(s_idx)
+                                    if s_entry and s_entry[0] == 'String':
+                                        s_val = c_ast.cp.get(s_entry[1], ('', ''))[1]
+                                        last_ldc_strings.append(s_val)
+                                        if len(last_ldc_strings) > 6:
+                                            last_ldc_strings.pop(0)
+                                        if ('invoke-static' in s_val or 'invoke-virtual' in s_val or ';->' in s_val) and last_fp_name:
+                                            ext_m = re.search(r'([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', s_val)
+                                            if ext_m:
+                                                ext_str = ext_m.group(1).lstrip('L').rstrip(';')
+                                                if is_extension_package(ext_str.split('->')[0]):
+                                                    ast_fp_bindings[last_fp_name] = (ext_str, s_val)
+                                elif op == 0x13 and idx + 2 < len(code):  # ldc_w
+                                    s_idx, = struct.unpack_from('>H', code, idx+1); idx += 3
+                                    s_entry = c_ast.cp.get(s_idx)
+                                    if s_entry and s_entry[0] == 'String':
+                                        s_val = c_ast.cp.get(s_entry[1], ('', ''))[1]
+                                        last_ldc_strings.append(s_val)
+                                        if len(last_ldc_strings) > 6:
+                                            last_ldc_strings.pop(0)
+                                        if ('invoke-static' in s_val or 'invoke-virtual' in s_val or ';->' in s_val) and last_fp_name:
+                                            ext_m = re.search(r'([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', s_val)
+                                            if ext_m:
+                                                ext_str = ext_m.group(1).lstrip('L').rstrip(';')
+                                                if is_extension_package(ext_str.split('->')[0]):
+                                                    ast_fp_bindings[last_fp_name] = (ext_str, s_val)
                                 elif op == 0xba and idx + 4 < len(code):  # invokedynamic
                                     id_idx, = struct.unpack_from('>H', code, idx+1); idx += 5
                                     entry = c_ast.cp.get(id_idx)
@@ -828,24 +857,31 @@ def generate_hook_recipe_json(
                                         if bsm_idx < len(bsms):
                                             bsm_args = bsms[bsm_idx]
                                             for b_arg in bsm_args:
-                                                if isinstance(b_arg, str) and 'invoke-static' in b_arg:
+                                                if isinstance(b_arg, str) and ('invoke-static' in b_arg or 'invoke-virtual' in b_arg or ';->' in b_arg):
                                                     ext_match = re.search(r'([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', b_arg)
                                                     if ext_match and last_fp_name:
                                                         ext_str = ext_match.group(1).lstrip('L').rstrip(';')
-                                                        ast_fp_bindings[last_fp_name] = (ext_str, b_arg)
+                                                        if is_extension_package(ext_str.split('->')[0]):
+                                                            ast_fp_bindings[last_fp_name] = (ext_str, b_arg)
                                 elif op in (0xb7, 0xb8) and idx + 2 < len(code):  # invokespecial, invokestatic
                                     m_idx, = struct.unpack_from('>H', code, idx+1); idx += 3
                                     ref = c_ast.cp.get(m_idx)
                                     if ref and ref[0] == 'Ref2':
                                         c_n = c_ast.cp.get(c_ast.cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
                                         nat = c_ast.cp.get(ref[1][1])
-                                        m_n = nat[0] if nat else ''
-                                        m_d = nat[1] if nat else ''
-                                        m_name_str = c_ast.cp.get(m_n, ('', ''))[1] if isinstance(m_n, int) else ''
-                                        m_desc_str = c_ast.cp.get(m_d, ('', ''))[1] if isinstance(m_d, int) else ''
-                                        if is_extension_package(c_n) and last_fp_name:
-                                            ext_str = f"{c_n}->{m_name_str}{m_desc_str}".lstrip('L').rstrip(';')
-                                            ast_fp_bindings[last_fp_name] = (ext_str, "")
+                                        if nat and nat[0] == 'NameAndType':
+                                            m_n_idx, m_d_idx = nat[1]
+                                            m_name_str = c_ast.cp.get(m_n_idx, ('', ''))[1]
+                                            m_desc_str = c_ast.cp.get(m_d_idx, ('', ''))[1]
+                                            if m_name_str == 'injectHideViewCall' and len(last_ldc_strings) >= 2 and last_fp_name:
+                                                c_str = next((s for s in reversed(last_ldc_strings) if ';->' in s or ('extension' in s and '/' in s)), None)
+                                                m_str = next((s for s in reversed(last_ldc_strings) if s and ('/' not in s) and (';' not in s) and not s.startswith('$')), None)
+                                                if c_str and m_str:
+                                                    clean_c = c_str.strip('L;')
+                                                    ast_fp_bindings[last_fp_name] = (f"{clean_c}->{m_str}(Landroid/view/View;)V", "")
+                                            elif is_extension_package(c_n) and m_name_str and last_fp_name:
+                                                ext_str = f"{c_n}->{m_name_str}{m_desc_str}".lstrip('L').rstrip(';')
+                                                ast_fp_bindings[last_fp_name] = (ext_str, "")
                                 else:
                                     idx += 1
 
@@ -853,12 +889,13 @@ def generate_hook_recipe_json(
                     fp_matches = re.findall(rb'(?:L)?(app/[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint)', combined_bytes)
                     fp_refs = set(m.decode("utf-8", errors="ignore") for m in fp_matches)
 
-                    ext_calls_raw = set(re.findall(rb'(?:Lapp/[a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', combined_bytes))
+                    ext_calls_raw = set(re.findall(rb'(?:L)?([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', combined_bytes))
                     ext_calls = [e.decode("utf-8", errors="ignore").lstrip("L").rstrip(";") for e in ext_calls_raw]
-                    # Filter out extension calls from other app tags
+                    # Filter out non-extension calls or calls from other app tags
                     ext_calls = [
                         e for e in ext_calls
-                        if not any(f".{other}." in e or f"/{other}/" in e for other in other_known_tags)
+                        if is_extension_package(e.split("->")[0])
+                        and not any(f".{other}." in e or f"/{other}/" in e for other in other_known_tags)
                     ]
 
                     all_text = " ".join(p_strings)
@@ -944,7 +981,12 @@ def generate_hook_recipe_json(
                             if not best_ext and len(available_ext_calls) == 1:
                                 best_ext = available_ext_calls[0]
 
-                        if not best_ext:
+                        if not best_ext or "->" not in best_ext or best_ext.endswith("->"):
+                            continue
+                        ext_parts = best_ext.split("->")
+                        ext_class_candidate = clean_type(ext_parts[0])
+                        ext_method_candidate = ext_parts[1].split("(")[0].strip()
+                        if not ext_method_candidate or not is_extension_package(ext_class_candidate):
                             continue
 
                         # Deduplicate identical (target_class, target_method, extension_call) hooks
@@ -1080,6 +1122,8 @@ def generate_hook_recipe_json(
 
                             b_ext_class = clean_type(ext.split("->")[0]) if "->" in ext else None
                             b_ext_method = ext.split("->")[1].split("(")[0].strip() if "->" in ext else None
+                            if not b_ext_class or not b_ext_method or not is_extension_package(b_ext_class):
+                                continue
 
                             b_hook: Dict[str, Any] = {
                                 "id": b_id,

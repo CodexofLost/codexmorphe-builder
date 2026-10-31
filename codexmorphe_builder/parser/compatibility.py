@@ -69,9 +69,11 @@ class DiscoveredApp:
 
 def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
     """
-    Inspect the patch classes in classes.dex and group them by target application.
+    Inspect the patch classes in classes.dex and group them by target application,
+    including shared patch classes across all applicable applications.
     """
     discovered: Dict[str, DiscoveredApp] = {}
+    shared_classes: List[str] = []
 
     for cls in archive.dex_classes:
         # Look for Patch classes: e.g. Lapp/morphe/patches/youtube/.../HideAdsPatchKt;
@@ -87,7 +89,10 @@ def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
             p_idx = parts.index("patches")
             if p_idx + 1 < len(parts):
                 app_tag = parts[p_idx + 1]
-                if app_tag in ("all", "shared", "util"):
+                if app_tag in ("all", "shared"):
+                    shared_classes.append(clean)
+                    continue
+                if app_tag == "util":
                     continue
 
                 pkg = KNOWN_NAMESPACE_MAPPINGS.get(app_tag, f"com.{app_tag}.app")
@@ -118,5 +123,28 @@ def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
                 discovered[pkg].patches.append(patch_info)
         except ValueError:
             pass
+
+    # Incorporate applicable shared and all patch classes into each discovered app
+    if shared_classes:
+        for pkg, app in discovered.items():
+            for s_cls in shared_classes:
+                # Exclude foreign shared domain patches (e.g. shared-youtube when building instagram)
+                if "youtube" in s_cls and app.app_tag not in ("youtube", "music"):
+                    continue
+                patch_name = clean_patch_name(s_cls)
+                patch_key = make_patch_key(patch_name)
+                patch_id = re.sub(r"[^a-z0-9]+", "_", patch_name.lower()).strip("_")
+                desc = f"Enables shared option for {patch_name.lower()}."
+
+                patch_info = PatchInfo(
+                    id=patch_id,
+                    name=patch_name,
+                    description=desc,
+                    default=True,
+                    key=patch_key,
+                    patch_class=s_cls
+                )
+                app.patch_classes.append(s_cls)
+                app.patches.append(patch_info)
 
     return discovered

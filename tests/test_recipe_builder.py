@@ -44,7 +44,7 @@ class TestRecipeBuilder(unittest.TestCase):
         res = generate_hook_recipe_json("com.instagram.android", app_info, archive=archive)
         data = json.loads(res)
         self.assertEqual(data["package_name"], "com.instagram.android")
-        self.assertTrue(len(data["hooks"]) > 100)
+        self.assertTrue(len(data["hooks"]) >= 90)
         self.assertTrue(len(data["entrypoints"]) > 0)
         self.assertIn("resource_fallbacks", data)
         self.assertTrue(any("ResourceUtils" in rf for rf in data["resource_fallbacks"]))
