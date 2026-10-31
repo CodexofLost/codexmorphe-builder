@@ -109,8 +109,7 @@ def is_framework_class(cls_name: str) -> bool:
             return False
     return any(cls_name.startswith(p) for p in (
         "java.", "javax.", "kotlin.", "kotlinx.", "j$.", "com.google.protobuf.",
-        "android.os.", "android.util.", "android.content.res.", "android.graphics.",
-        "android.view.", "android.widget."
+        "android."
     ))
 
 
@@ -403,6 +402,27 @@ class ClassfileAst:
         return None
 
 
+KNOWN_LIFECYCLE_METHODS = {
+    "<init>",
+    "onCreate",
+    "onStart",
+    "onResume",
+    "onPause",
+    "onStop",
+    "onDestroy",
+    "onClick",
+    "onViewCreated",
+    "getView",
+    "onMeasure",
+    "onDraw",
+    "dispatchTouchEvent",
+    "onNewIntent",
+    "finish",
+    "run",
+    "attachBaseContext",
+}
+
+
 def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
     Extract DexKit 2.3.0 MethodMatcher criteria from a compiled *Fingerprint.class file
@@ -428,6 +448,8 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         or file_name.endswith("ConstructorFingerprint")
         or file_name.endswith("CtorFingerprint")
         or "Ctor" in file_name
+        or "Init" in file_name
+        or file_name.endswith("InitFingerprint")
     )
 
     stack: List[Any] = []
@@ -566,9 +588,18 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             'this', '<this>', 'patchContext', 'patch', 'method', 'invoke', 'injected', 'true', 'false'
                         )
                     ):
-                        if 'method_name' not in fp and not s_clean.startswith("app"):
+                        if s_clean in KNOWN_LIFECYCLE_METHODS:
+                            if 'method_name' not in fp:
+                                fp['method_name'] = s_clean
+                        elif 'declaring_class' in fp and 'method_name' not in fp and not s_clean.startswith("app"):
                             fp['method_name'] = s_clean
-                        elif len(s_clean) >= 4:
+                        elif (
+                            len(s_clean) >= 4
+                            and not is_extension_package(s_clean)
+                            and "Fingerprint" not in s_clean
+                            and not s_clean.endswith("(...)")
+                            and not any(ord(c) < 32 for c in s_clean)
+                        ):
                             candidate_strings.append(s_clean)
                     elif (
                         len(s_clean) >= 4
@@ -584,14 +615,6 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                     if cls_name and is_valid_class_name(cls_name) and not is_framework_class(cls_name):
                         if 'declaring_class' not in fp:
                             fp['declaring_class'] = cls_name
-                elif isinstance(ival, int) and 1000 < ival < 2000000000:
-                    if 'literal' not in fp:
-                        fp['literal'] = ival
-        elif itype == 'const_int':
-            ival = ival
-            if isinstance(ival, int) and 1000 < ival < 2000000000:
-                if 'literal' not in fp:
-                    fp['literal'] = ival
         elif itype == 'invoke':
             inv_target = const_tag or ""
             if in_array and 'listOf' in inv_target:
@@ -645,11 +668,8 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             fp['return_type'] = "void"
 
     if param_types:
-        if any(p == 'L' for p in param_types):
-            fp['param_count'] = len(param_types)
-            fp['param_types'] = []
-        else:
-            fp['param_types'] = param_types
+        fp['param_types'] = param_types
+        fp['param_count'] = len(param_types)
 
     # Discard non-discriminating strings
     GENERIC_DISCRIMINATORS = {'this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'invoke', 'true', 'false', 'null'}
@@ -669,11 +689,16 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                 del fp['declaring_class']
 
     # CRITICAL GUARD: A fingerprint MUST have at least one specific discriminator
-    # (method_name, non-empty strings, or a literal number).
+    # (method_name, non-empty strings, a literal number, or a concrete non-framework parameter type).
+    has_concrete_param = any(
+        p != 'L' and len(p) > 5 and not is_framework_class(p) and '.' in p
+        for p in fp.get('param_types', [])
+    )
     has_discriminator = bool(
         fp.get('method_name') or
         fp.get('strings') or
-        fp.get('literal') is not None
+        fp.get('literal') is not None or
+        has_concrete_param
     )
     if not has_discriminator:
         return None
@@ -950,14 +975,27 @@ def generate_hook_recipe_json(
                             continue
 
                         # Constructor detection fallback
-                        if "Constructor" in fp_simple or fp_name.endswith("Constructor") or "Ctor" in fp_simple:
+                        if "Constructor" in fp_simple or fp_name.endswith("Constructor") or "Ctor" in fp_simple or "Init" in fp_simple or fp_name.endswith("Init"):
                             fp_def['method_name'] = "<init>"
                             if 'return_type' not in fp_def or not fp_def.get('return_type'):
                                 fp_def['return_type'] = "void"
 
+                        # Derive method name from fingerprint class name if missing but declaring class is known
+                        if not fp_def.get('method_name') and fp_def.get('declaring_class'):
+                            cls_simple = fp_def['declaring_class'].split('.')[-1]
+                            derived = fp_name
+                            if cls_simple and cls_simple in derived:
+                                derived = derived.replace(cls_simple, "")
+                            if derived and derived.isidentifier():
+                                fp_def['method_name'] = derived[0].lower() + derived[1:]
+
                         # Guard against wildcard queries in Path A:
-                        # Must have method_name, non-empty strings, or literal
-                        if not fp_def.get('method_name') and not fp_def.get('strings') and fp_def.get('literal') is None:
+                        # Must have method_name, non-empty strings, literal, or concrete param type
+                        has_concrete_param = any(
+                            p != 'L' and len(p) > 5 and not is_framework_class(p) and '.' in p
+                            for p in fp_def.get('param_types', [])
+                        )
+                        if not fp_def.get('method_name') and not fp_def.get('strings') and fp_def.get('literal') is None and not has_concrete_param:
                             continue
 
                         target_mtd = fp_def.get('method_name', '')

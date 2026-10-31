@@ -56,9 +56,8 @@ class TestRecipeBuilder(unittest.TestCase):
             self.assertFalse(dc.startswith("app.morphe") or dc.startswith("app.hushgram"))
             # Verify no method descriptors treated as classes
             self.assertFalse("->" in dc or ";" in dc)
-            # Verify no wildcards in param_types
+            # Verify clean types in param_types (allowing "L" wildcards)
             for pt in fp.get("param_types", []):
-                self.assertNotEqual(pt, "L")
                 self.assertFalse(";" in pt or "->" in pt)
             for s in fp.get("strings", []):
                 self.assertFalse("Fingerprint" in s or "app/morphe" in s or "app/hushgram" in s)

@@ -82,6 +82,8 @@ Resolve remaining runtime failures (YouTube `akrh.e()` NPE) and inert feature st
 - [x] Extension Lifecycle & Initialization:
   - [x] Support Kotlin singleton `object` (`INSTANCE` field) and `ResourceUtilsKt` facades in `BundleBridge.kt`.
   - [x] Pass proper host context and set `fallbackPackageName` across static methods, fields, and singleton instances.
+  - [x] Canonical MultiDex container sorting (`classes.dex` through `classesN.dex`) in `BundleClassLoader.kt`.
+  - [x] Dual `ResourcesLoader` + `AssetManager.addAssetPath` injection in `BundleResourceInjector.kt` to guarantee both compiled resources and raw assets are accessible.
 - [x] Hook Execution Safety in `DexKitHookDispatcher.kt`:
   - [x] Guard `parseExtensionCall`: ensure `method.isNotEmpty()` and `cls.isNotEmpty()`.
 - [ ] Compile and install updated client engine APK via `fast-gradlew assembleDebug` and `adb install -r`.
