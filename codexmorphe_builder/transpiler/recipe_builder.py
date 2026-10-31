@@ -122,7 +122,14 @@ def is_valid_class_name(name: str) -> bool:
     if is_extension_package(name):
         return False
     parts = name.split(".")
-    return all(part.isidentifier() for part in parts)
+    for part in parts:
+        if not part:
+            return False
+        # Each part can contain inner-class '$' delimiters (e.g. Outer$Inner or Activity$1)
+        for sub in part.split("$"):
+            if not sub or not (sub.isidentifier() or sub.isdigit()):
+                return False
+    return True
 
 
 def is_extension_package(name: str) -> bool:
@@ -423,6 +430,50 @@ KNOWN_LIFECYCLE_METHODS = {
 }
 
 
+PATCHER_FRAMEWORK_FIELDS = {
+    'PUBLIC', 'PRIVATE', 'PROTECTED', 'STATIC', 'FINAL', 'SYNCHRONIZED',
+    'VOLATILE', 'TRANSIENT', 'NATIVE', 'INTERFACE', 'ABSTRACT', 'STRICTFP',
+    'SYNTHETIC', 'ANNOTATION', 'ENUM', 'CONSTRUCTOR', 'DECLARED_SYNCHRONIZED',
+    'STRING', 'ID', 'LAYOUT', 'DRAWABLE', 'COLOR', 'ANIM', 'ATTR', 'DIMEN',
+}
+
+
+def is_valid_dex_string(s: str) -> bool:
+    """
+    Validate whether a string is a genuine DEX bytecode identifier or literal,
+    rather than a patch description, compiler exception message, or diagnostic log.
+    """
+    if not s or len(s) < 3 or len(s) > 80:
+        return False
+    if any(ord(c) < 32 or ord(c) > 126 for c in s):
+        return False
+    if any(x in s for x in ("->", "{", "}", "\n", "\t", "\\")):
+        return False
+    if s in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'true', 'false', 'null', 'none', 'what', 'type') or s.startswith('<') or s.endswith('>'):
+        return False
+    lower = s.lower()
+    # Reject English sentences, author diagnostics, and patch metadata
+    if any(k in lower for k in (
+        "expected", "found", "missing", "isn't", "aren't", "doesn't", "don't", "can't",
+        "cannot", "must", "should", "failed", "error", "exception", "warning", "unknown",
+        "report", "rebuild", "reopen", "retry", "branch", "bridge", "getter", "setter",
+        "has no", "no public", "not public", "in this build", "left out", "in one place",
+        "extension", "patch", "fingerprint", "targets", "predicate", "element",
+        "no declared preference", "adds settings for morphe", "remove viewer discretion",
+        "unexpected fields", "unexpected popup", "restore trust", "lock your",
+        "show hidden", "remove build", "hushgram", "morphe", "answers", "another",
+        "holds", "where", "which", "instruction", "status bar height"
+    )):
+        return False
+    # Multi-word English sentences
+    if s.count(' ') >= 2:
+        return False
+    # Single-space allowed only for short formatting tokens like 'MMMM d' or '%s %s'
+    if ' ' in s and not (len(s) <= 10 and (s.startswith('%') or 'd' in s or 'M' in s)):
+        return False
+    return True
+
+
 def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dict[str, Any]]:
     """
     Extract DexKit 2.3.0 MethodMatcher criteria from a compiled *Fingerprint.class file
@@ -455,6 +506,8 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
     stack: List[Any] = []
     idx = 0
     instructions: List[Tuple[str, Any, Any]] = []
+    resource_strings: Set[str] = set()
+    res_literal_info: Optional[Tuple[str, str]] = None
 
     while idx < len(init_code):
         op = init_code[idx]
@@ -462,6 +515,22 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             stack.append(None); idx += 1
         elif op == 0x2a:  # aload_0 (this)
             stack.append('this'); idx += 1
+        elif op == 0xb2:  # getstatic
+            if idx + 2 >= len(init_code): break
+            f_idx, = struct.unpack_from('>H', init_code, idx+1); idx += 3
+            ref = ast.cp.get(f_idx)
+            if ref and ref[0] == 'Ref2':
+                c_n = ast.cp.get(ast.cp.get(ref[1][0], (None, None))[1], (None, ''))[1]
+                nat = ast.cp.get(ref[1][1])
+                f_n = ast.cp.get(nat[1][0], (None, ''))[1] if nat else ''
+                f_d = ast.cp.get(nat[1][1], (None, ''))[1] if nat else ''
+                instructions.append(('getstatic', f'{c_n}->{f_n}:{f_d}', c_n))
+                if 'AccessFlags' in c_n or 'Opcode' in c_n or 'ResourceType' in c_n or f_n in PATCHER_FRAMEWORK_FIELDS:
+                    stack.append(('patcher_flag', c_n, f_n))
+                else:
+                    stack.append(('getstatic', c_n, f_n))
+            else:
+                stack.append(('getstatic', None, None))
         elif op in (0x12, 0x13):  # ldc, ldc_w
             if op == 0x12:
                 if idx + 1 >= len(init_code): break
@@ -477,7 +546,17 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                     val = val_utf[1] if val_utf else None
                 else:
                     val = entry[1]
-            instructions.append(('ldc', entry[0] if entry else None, val))
+            # Detect if this literal is immediately consumed by invokestatic listOf(...)
+            is_followed_by_list = False
+            if idx < len(init_code) and init_code[idx] == 0xb8 and idx + 2 < len(init_code):
+                next_m_idx, = struct.unpack_from('>H', init_code, idx+1)
+                next_ref = ast.cp.get(next_m_idx)
+                if next_ref and next_ref[0] == 'Ref2':
+                    next_nat = ast.cp.get(next_ref[1][1])
+                    next_m_name = ast.cp.get(next_nat[1][0], (None, ''))[1] if next_nat else ''
+                    if 'listOf' in next_m_name:
+                        is_followed_by_list = True
+            instructions.append(('ldc', entry[0] if entry else None, val, is_followed_by_list))
             stack.append(('ldc', entry[0] if entry else None, val))
         elif op in (0x10, 0x11):  # bipush, sipush
             if op == 0x10:
@@ -503,6 +582,28 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                 m_n = ast.cp.get(nat[1][0], (None, ''))[1] if nat else ''
                 m_d = ast.cp.get(nat[1][1], (None, ''))[1] if nat else ''
                 instructions.append(('invoke', f'{c_n}->{m_n}{m_d}', None))
+
+                if 'resourceLiteral' in m_n:
+                    # Filter out AAPT resource names from Dalvik string pools and record resource query
+                    res_name = None
+                    res_type = 'string'
+                    for item in reversed(stack):
+                        if isinstance(item, tuple) and len(item) > 2 and item[0] == 'ldc' and item[1] == 'String':
+                            if item[2] and isinstance(item[2], str):
+                                res_name = item[2]
+                                resource_strings.add(res_name)
+                                break
+                        elif isinstance(item, str) and item not in ('this', '<this>'):
+                            res_name = item
+                            resource_strings.add(res_name)
+                            break
+                    for item in stack:
+                        if isinstance(item, tuple) and len(item) > 2 and item[0] in ('getstatic', 'patcher_flag'):
+                            if 'ResourceType' in str(item[1]):
+                                res_type = str(item[2]).lower()
+                    if res_name:
+                        res_literal_info = (res_name, res_type)
+
                 if 'listOf' in m_n or 'emptyList' in m_n:
                     if 'emptyList' in m_n:
                         stack.append([])
@@ -512,8 +613,12 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             if isinstance(top, list):
                                 stack.append(top)
                             else:
-                                val = top[2] if isinstance(top, tuple) and len(top) > 2 else top
-                                stack.append([val] if val is not None else [])
+                                if isinstance(top, tuple) and len(top) > 2 and top[0] == 'patcher_flag':
+                                    pass
+                                else:
+                                    val = top[2] if isinstance(top, tuple) and len(top) > 2 else top
+                                    if val and val not in PATCHER_FRAMEWORK_FIELDS:
+                                        stack.append([val])
                         else:
                             stack.append([])
         elif op == 0xbd:  # anewarray
@@ -525,12 +630,19 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
             idx += 1
 
     fp: Dict[str, Any] = {}
+    if res_literal_info:
+        fp['resource_name'] = res_literal_info[0]
+        fp['resource_type'] = res_literal_info[1]
     pending_list: List[Tuple[Optional[str], Any]] = []
     in_array = False
     param_types: List[str] = []
     candidate_strings: List[str] = []
 
-    for itype, const_tag, ival in instructions:
+    for inst in instructions:
+        itype = inst[0]
+        const_tag = inst[1]
+        ival = inst[2]
+        is_followed_by_list = inst[3] if len(inst) > 3 else False
         if itype == 'anewarray':
             in_array = True
             pending_list = []
@@ -566,7 +678,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                     elif s_clean.startswith('/') and s_clean.endswith(';'):
                         fp['declaring_class_ends_with'] = s_clean.strip('/;').replace('/', '.')
                     elif s_clean in ('V', 'Z', 'I', 'J', 'F', 'D', 'S', 'B', 'C'):
-                        if 'return_type' not in fp:
+                        if not is_followed_by_list and 'return_type' not in fp:
                             fp['return_type'] = clean_type(s_clean)
                     elif "." in s_clean and not s_clean.endswith("..."):
                         parts = s_clean.split(".")
@@ -658,9 +770,59 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                         and not is_extension_package(s)
                         and "Fingerprint" not in s
                         and s not in ('this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'true', 'false')
+                        and s not in PATCHER_FRAMEWORK_FIELDS
                     ):
                         if s not in candidate_strings:
                             candidate_strings.append(s)
+
+    # Inspect predicate lambdas (_init_$lambda$0, etc.) for classDef / method criteria
+    for (m_name, _), code in ast.methods.items():
+        if 'lambda' not in m_name or not code:
+            continue
+        l_idx = 0
+        l_strings: List[str] = []
+        while l_idx < len(code):
+            op = code[l_idx]
+            if op in (0x12, 0x13):
+                if op == 0x12:
+                    if l_idx + 1 >= len(code): break
+                    c_idx = code[l_idx+1]; l_idx += 2
+                else:
+                    if l_idx + 2 >= len(code): break
+                    c_idx, = struct.unpack_from('>H', code, l_idx+1); l_idx += 3
+                entry = ast.cp.get(c_idx)
+                if entry and entry[0] == 'String':
+                    val_utf = ast.cp.get(entry[1])
+                    val = val_utf[1] if val_utf else None
+                    if val and isinstance(val, str):
+                        l_strings.append(val)
+            else:
+                l_idx += 1
+
+        for s in l_strings:
+            s_clean = s.strip()
+            if s_clean.startswith('L') and s_clean.endswith(';'):
+                ct = clean_type(s_clean)
+                if ct and is_valid_class_name(ct) and not is_framework_class(ct):
+                    if not any(ct.endswith(m) for m in ('Item', 'Media', 'Model', 'Data', 'Entity', 'Args', 'Arguments')):
+                        if 'declaring_class' not in fp:
+                            fp['declaring_class'] = ct
+                    elif 'declaring_class' not in fp and 'fragment' in ct.lower():
+                        fp['declaring_class'] = ct
+            elif s_clean in KNOWN_LIFECYCLE_METHODS or s_clean in ('toString', 'onBackPressed', 'handleMessage'):
+                if 'method_name' not in fp:
+                    fp['method_name'] = s_clean
+            elif is_valid_dex_string(s_clean) and s_clean not in ('method', 'classDef', 'getParameterTypes(...)', 'this', '<this>', '<unused var>'):
+                if s_clean not in candidate_strings:
+                    candidate_strings.append(s_clean)
+
+    # Track parent fingerprint inheritance from constructor getstatic
+    for item in stack:
+        if isinstance(item, tuple) and len(item) > 2 and item[0] == 'getstatic':
+            c_name = item[1]
+            if c_name and 'Fingerprint' in c_name and c_name != class_name:
+                fp['parent_fingerprint'] = c_name.replace('/', '.')
+                break
 
     if is_constructor:
         fp['method_name'] = "<init>"
@@ -671,11 +833,16 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         fp['param_types'] = param_types
         fp['param_count'] = len(param_types)
 
-    # Discard non-discriminating strings
+    # Discard non-discriminating strings and resource literals
     GENERIC_DISCRIMINATORS = {'this', '<this>', 'patchContext', 'patch', 'method', '<init>', 'invoke', 'true', 'false', 'null'}
-    cleaned_strings = [s for s in candidate_strings if s not in GENERIC_DISCRIMINATORS and len(s) >= 4]
+    cleaned_strings = [
+        s for s in candidate_strings
+        if s not in GENERIC_DISCRIMINATORS and s not in resource_strings and s not in PATCHER_FRAMEWORK_FIELDS and is_valid_dex_string(s)
+    ]
     if cleaned_strings:
         fp['strings'] = cleaned_strings[:5]
+
+    fp['fingerprint_class'] = class_name.replace('/', '.').removesuffix('.class')
 
     # Clean overly broad or framework declaring classes
     declaring_cls = fp.get('declaring_class')
@@ -683,6 +850,9 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         if is_framework_class(declaring_cls):
             if 'return_type' not in fp:
                 fp['return_type'] = declaring_cls
+            del fp['declaring_class']
+        elif declaring_cls in param_types:
+            # Mistaken parameter type pushed during singleton listOf()
             del fp['declaring_class']
         elif declaring_cls in ('java.lang.Object', 'android.content.res.Resources', 'android.view.View'):
             if not fp.get('method_name'):
@@ -698,6 +868,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         fp.get('method_name') or
         fp.get('strings') or
         fp.get('literal') is not None or
+        fp.get('resource_name') or
         has_concrete_param
     )
     if not has_discriminator:
@@ -715,6 +886,7 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
         and not fp.get("declaring_class_ends_with")
         and not fp.get("strings")
         and not fp.get("literal")
+        and not fp.get("resource_name")
     ):
         return None
 
@@ -980,6 +1152,18 @@ def generate_hook_recipe_json(
                             if 'return_type' not in fp_def or not fp_def.get('return_type'):
                                 fp_def['return_type'] = "void"
 
+                        # Parent fingerprint inheritance
+                        if not fp_def.get('declaring_class') and fp_def.get('parent_fingerprint'):
+                            parent_simple = fp_def['parent_fingerprint'].split('.')[-1]
+                            parent_file = fp_file_map.get(parent_simple + ".class")
+                            if parent_file:
+                                parent_def = extract_fingerprint_def(parent_file, z.read(parent_file))
+                                if parent_def:
+                                    if parent_def.get('declaring_class'):
+                                        fp_def['declaring_class'] = parent_def['declaring_class']
+                                    else:
+                                        fp_def['parent_query'] = parent_def
+
                         # Derive method name from fingerprint class name if missing but declaring class is known
                         if not fp_def.get('method_name') and fp_def.get('declaring_class'):
                             cls_simple = fp_def['declaring_class'].split('.')[-1]
@@ -1125,9 +1309,10 @@ def generate_hook_recipe_json(
                         # Extract only valid host Java class names (avoiding framework classes and method descriptors)
                         direct_classes = [
                             clean_type(x) for x in p_strings
-                            if (x.startswith('Lcom/') or x.startswith('Landroid/'))
+                            if x.startswith('L')
                             and x.endswith(';')
-                            and not x.startswith('Lcom/android/tools/')
+                            and '/' in x
+                            and not x.startswith(('Lcom/android/tools/', 'Lapp/morphe/', 'Lkotlin/', 'Ljava/'))
                             and is_valid_class_name(clean_type(x))
                             and not is_framework_class(clean_type(x))
                         ]
@@ -1148,11 +1333,26 @@ def generate_hook_recipe_json(
                                         and not s.endswith('(...)')
                                         and not any(ord(c) < 32 for c in s)
                                         and not is_extension_package(s)
-                                        and not any(k in s.lower() for k in ('fingerprint', 'exception', 'java/', '<', 'patch', 'what', 'targets', 'predicate', 'element'))
+                                        and is_valid_dex_string(s)
+                                        and s not in PATCHER_FRAMEWORK_FIELDS
                                     ):
                                         comp_strings.append(s)
                                     if s in ('Z', 'V', 'I'):
                                         comp_return = clean_type(s)
+
+                        if not comp_strings:
+                            for s in p_strings:
+                                if (
+                                    4 < len(s) < 50
+                                    and not s.startswith(('L', '[', '('))
+                                    and not s.endswith(('(...)', ';'))
+                                    and not any(ord(c) < 32 for c in s)
+                                    and not is_extension_package(s)
+                                    and is_valid_dex_string(s)
+                                    and s not in ('patchContext', 'classDef', 'method', '<init>', 'true', 'false', 'null')
+                                    and s not in PATCHER_FRAMEWORK_FIELDS
+                                ):
+                                    comp_strings.append(s)
 
                         for idx, ext in enumerate(ext_calls):
                             # Resolve target class & method intelligently
@@ -1167,6 +1367,14 @@ def generate_hook_recipe_json(
                                 target_cls = direct_classes[idx] if idx < len(direct_classes) else (direct_classes[0] if direct_classes else None)
                                 target_mtd = direct_methods[idx] if idx < len(direct_methods) else (direct_methods[0] if direct_methods else None)
 
+                            # Disambiguate Activity lifecycle targets and decouple data models
+                            if target_mtd in ('onBackPressed', 'onCreate', 'onStart', 'onResume', 'onPause', 'onStop', 'onDestroy', 'onNewIntent', 'finish'):
+                                if not target_cls or is_framework_class(target_cls) or any(target_cls.endswith(m) for m in ('Item', 'Media', 'Model', 'Data')):
+                                    target_cls = 'android.app.Activity'
+                            elif target_mtd in ('onClick', 'getView', 'onViewCreated'):
+                                if target_cls and any(target_cls.endswith(m) for m in ('Item', 'Media', 'Model', 'Data', 'Entity')):
+                                    target_cls = None
+
                             # CRITICAL GUARD: Never emit a wildcard hook without method name or unique strings
                             if not target_mtd and not comp_strings:
                                 continue
@@ -1176,14 +1384,25 @@ def generate_hook_recipe_json(
                                 b_fp['declaring_class'] = target_cls
                             if target_mtd:
                                 b_fp['method_name'] = target_mtd
+
+                            if target_mtd == 'onClick' and not target_cls:
+                                has_dialog_interface = any(
+                                    'DialogInterface' in s
+                                    for cf in companion_classes
+                                    for s in parse_jvm_class(z.read(cf))[0]
+                                )
+                                if has_dialog_interface:
+                                    b_fp['param_types'] = ['android.content.DialogInterface', 'int']
+                                    b_fp['param_count'] = 2
+
                             # Only include strings if we don't have an exact class + method target
                             if comp_strings and (not target_cls or not target_mtd):
                                 b_fp['strings'] = comp_strings[:3]
                             if comp_return:
                                 b_fp['return_type'] = comp_return
 
-                            # Reject unconstrained queries (must have method_name, non-empty strings, or literal)
-                            if not b_fp.get('method_name') and not b_fp.get('strings') and b_fp.get('literal') is None:
+                            # Reject unconstrained queries (must have declaring_class, param_types, strings, or literal)
+                            if not b_fp.get('declaring_class') and not b_fp.get('strings') and b_fp.get('literal') is None and not b_fp.get('param_types'):
                                 continue
 
                             ext_mtd_name = ext.split("->")[1].split("(")[0].lower()
