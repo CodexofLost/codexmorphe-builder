@@ -144,13 +144,22 @@ class MppArchive:
                 for o in other_apps
             }
 
+            host_ids: Set[str] = set()
+
             for name in z.namelist():
-                # 1. Skip non-resource files, directory entries, and excluded branding
+                # 1. Skip non-resource files, directory entries, and patches
                 if name.endswith("/") or name.startswith("META-INF/") or name.startswith("patches/"):
                     continue
-                if name.startswith("custom-branding/") or "branding" in name.lower() and ("icon" in name.lower() or "logo" in name.lower()):
-                    continue
+
+                # Collect declared resource IDs from /host/ layout templates (e.g. morphe_external_download_button)
                 if "/host/" in name:
+                    if name.endswith(".xml"):
+                        try:
+                            host_xml = z.read(name).decode("utf-8", errors="ignore")
+                            for m in re.finditer(r'@\+id/([a-zA-Z0-9_]+)', host_xml):
+                                host_ids.add(m.group(1))
+                        except Exception:
+                            pass
                     continue
 
                 ext = "." + name.split(".")[-1].lower() if "." in name else ""
@@ -259,6 +268,15 @@ class MppArchive:
                     out_target_file = target_type_dir / Path(name).name
                     with open(out_target_file, "wb") as out:
                         out.write(z.read(name))
+
+            if host_ids:
+                val_dir = dest_res_dir / "values"
+                val_dir.mkdir(parents=True, exist_ok=True)
+                items = "\n".join(f'    <item type="id" name="{i}" />' for i in sorted(host_ids))
+                (val_dir / "host_ids.xml").write_text(
+                    f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n{items}\n</resources>\n',
+                    encoding="utf-8"
+                )
 
         return dest_res_dir
 
