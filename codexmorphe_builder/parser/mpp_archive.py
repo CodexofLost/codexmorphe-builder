@@ -1,5 +1,6 @@
 import re
 import struct
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,17 +206,30 @@ class MppArchive:
                             val_dir = dest_res_dir / val_qualifier
                             val_dir.mkdir(parents=True, exist_ok=True)
                             raw_xml = z.read(name).decode("utf-8", errors="ignore")
-                            # Sanitize unescaped % tokens for AAPT2 format validation
-                            fixed_xml = re.sub(
-                                r'<string\s+([^>]*?)>([^<]*?%[^<]*?)</string>',
-                                lambda m: f'<string {m.group(1)} formatted="false">{m.group(2)}</string>' if 'formatted=' not in m.group(1) else m.group(0),
-                                raw_xml
-                            )
-                            fixed_xml = re.sub(
-                                r'<item\s*([^>]*?)>([^<]*?%[^<]*?)</item>',
-                                lambda m: f'<item {m.group(1)} formatted="false">{m.group(2)}</item>' if 'formatted=' not in m.group(1) else m.group(0),
-                                fixed_xml
-                            )
+                            # Sanitize unescaped % tokens via XML DOM AST for strict AAPT2 compliance
+                            fixed_xml = raw_xml
+                            try:
+                                root = ET.fromstring(raw_xml)
+                                modified = False
+                                for elem in root.iter():
+                                    if elem.tag in ("string", "item") and elem.text and "%" in elem.text:
+                                        if "formatted" not in elem.attrib:
+                                            elem.set("formatted", "false")
+                                            modified = True
+                                if modified:
+                                    fixed_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
+                            except ET.ParseError:
+                                # Fallback regex for non-standard XML fragments
+                                fixed_xml = re.sub(
+                                    r'<string\s+([^>]*?)>([^<]*?%[^<]*?)</string>',
+                                    lambda m: f'<string {m.group(1)} formatted="false">{m.group(2)}</string>' if 'formatted=' not in m.group(1) else m.group(0),
+                                    raw_xml
+                                )
+                                fixed_xml = re.sub(
+                                    r'<item\s*([^>]*?)>([^<]*?%[^<]*?)</item>',
+                                    lambda m: f'<item {m.group(1)} formatted="false">{m.group(2)}</item>' if 'formatted=' not in m.group(1) else m.group(0),
+                                    fixed_xml
+                                )
                             xml_stem = parts[3].replace(".xml", "")
                             out_file = val_dir / f"{xml_stem}_{target}.xml"
                             out_file.write_text(fixed_xml, encoding="utf-8")

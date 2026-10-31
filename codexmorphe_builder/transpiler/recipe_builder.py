@@ -115,14 +115,15 @@ def is_framework_class(cls_name: str) -> bool:
 
 
 def is_valid_class_name(name: str) -> bool:
-    """Validate that a string is a clean, fully-qualified Java class name."""
+    """Validate that a string is a clean, fully-qualified Java class name via identifier AST rules."""
     if not name or len(name) < 2:
         return False
     if any(c in name for c in (";", "->", " ", "(", ")", ":", "[", "<", ">", "$$")):
         return False
     if is_extension_package(name):
         return False
-    return bool(re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*(\.[a-zA-Z_$][a-zA-Z0-9_$]*)*$', name))
+    parts = name.split(".")
+    return all(part.isidentifier() for part in parts)
 
 
 def is_extension_package(name: str) -> bool:
@@ -212,39 +213,31 @@ def discover_extension_entrypoints(
     seen_rf = set()
 
     def scan_dex_bytes(data: bytes):
-        if b'SettingsEntry' in data:
-            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/SettingsEntry);', data)
-            for m in set(matches):
-                cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
+        dex_classes = MppArchive._extract_dex_classes(data)
+        for cls_desc in dex_classes:
+            if "$" in cls_desc:
+                continue
+            if cls_desc.endswith("/SettingsEntry;"):
+                cls_name = cls_desc[1:-1].replace('/', '.')
                 ep = f"{cls_name}#onApplicationCreate"
                 if ep not in seen:
                     seen.add(ep)
                     entrypoints.append(ep)
-
-        if b'AddOnApi' in data:
-            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/AddOnApi);', data)
-            for m in set(matches):
-                cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
+            elif cls_desc.endswith("/AddOnApi;"):
+                cls_name = cls_desc[1:-1].replace('/', '.')
                 ep = f"{cls_name}#initialize"
                 if ep not in seen:
                     seen.add(ep)
                     entrypoints.append(ep)
-
-        if b'Utils' in data:
-            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/Utils);', data)
-            for m in set(matches):
-                cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
-                if not is_extension_package(cls_name):
-                    continue
-                ep = f"{cls_name}#setContext"
-                if ep not in seen:
-                    seen.add(ep)
-                    entrypoints.append(ep)
-
-        if b'ResourceUtils' in data:
-            matches = re.findall(rb'L([a-zA-Z0-9_$/]+/ResourceUtils(?:Kt)?);', data)
-            for m in set(matches):
-                cls_name = m.decode('utf-8', errors='ignore').replace('/', '.')
+            elif cls_desc.endswith("/Utils;"):
+                cls_name = cls_desc[1:-1].replace('/', '.')
+                if is_extension_package(cls_name):
+                    ep = f"{cls_name}#setContext"
+                    if ep not in seen:
+                        seen.add(ep)
+                        entrypoints.append(ep)
+            elif cls_desc.endswith("/ResourceUtils;") or cls_desc.endswith("/ResourceUtilsKt;"):
+                cls_name = cls_desc[1:-1].replace('/', '.')
                 if cls_name not in seen_rf:
                     seen_rf.add(cls_name)
                     resource_fallbacks.append(cls_name)
@@ -402,7 +395,7 @@ class ClassfileAst:
     def get_constant_string(self, idx: int) -> Optional[str]:
         entry = self.cp.get(idx)
         if entry:
-            if entry[0] == 'String':
+            if entry[0] in ('String', 'Class'):
                 utf = self.cp.get(entry[1])
                 return utf[1] if utf and utf[0] == 'Utf8' else None
             elif entry[0] == 'Utf8':
@@ -567,7 +560,8 @@ def extract_fingerprint_def(class_name: str, class_bytes: bytes) -> Optional[Dic
                             candidate_strings.append(s_clean)
                     elif (
                         not is_constructor
-                        and re.match(r'^[a-z_$][a-zA-Z0-9_$]*$', s_clean)
+                        and s_clean.isidentifier()
+                        and (s_clean[0].islower() or s_clean[0] in ('_', '$'))
                         and s_clean not in (
                             'this', '<this>', 'patchContext', 'patch', 'method', 'invoke', 'injected', 'true', 'false'
                         )
@@ -750,26 +744,33 @@ def generate_hook_recipe_json(
     entrypoints, resource_fallbacks = discover_extension_entrypoints(extracted_mpe, archive, app_tag=app_info.app_tag)
 
     # 2. Extract hook recipes from .mpp archive if provided
-    if archive and archive.path.exists():
+    if archive and Path(archive.path).exists():
         app_tag = app_info.app_tag
-        other_known_tags = {"music", "youtube", "reddit", "instagram", "twitter", "waze", "twitch"} - {app_tag}
-
-        def is_patch_for_app(path: str) -> bool:
-            # Exclude other app primary directories (e.g. music when building youtube)
-            for other in other_known_tags:
-                if f"/{other}/" in path or f"app/morphe/patches/{other}/" in path:
-                    return False
-            return (
-                f"/{app_tag}/" in path
-                or f"app/morphe/patches/{app_tag}/" in path
-                or "/shared/" in path
-                or "/all/" in path
-            )
 
         retained_set = set(retained_patches) if retained_patches is not None else None
 
-        with zipfile.ZipFile(archive.path, "r") as z:
+        with zipfile.ZipFile(Path(archive.path), "r") as z:
             names = z.namelist()
+
+            # Dynamically discover all app tags present in this archive (avoiding hardcoded app lists)
+            archive_tags = {
+                n.split("app/morphe/patches/")[1].split("/")[0]
+                for n in names
+                if "app/morphe/patches/" in n and "/" in n.split("app/morphe/patches/")[1]
+            } - {"shared", "all", ""}
+            other_known_tags = archive_tags - {app_tag}
+
+            def is_patch_for_app(path: str) -> bool:
+                # Exclude other app primary directories (e.g. music when building youtube)
+                for other in other_known_tags:
+                    if f"/{other}/" in path or f"app/morphe/patches/{other}/" in path:
+                        return False
+                return (
+                    f"/{app_tag}/" in path
+                    or f"app/morphe/patches/{app_tag}/" in path
+                    or "/shared/" in path
+                    or "/all/" in path
+                )
 
             patch_classes = [
                 n for n in names
@@ -892,12 +893,40 @@ def generate_hook_recipe_json(
                                 else:
                                     idx += 1
 
-                    # Discover all fingerprints referenced in this patch or its companion classes
-                    fp_matches = re.findall(rb'(?:L)?(app/[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint)', combined_bytes)
-                    fp_refs = set(m.decode("utf-8", errors="ignore") for m in fp_matches)
+                    # Discover all fingerprints and extension calls referenced in this patch or its companion classes via Constant Pool AST
+                    fp_refs = set()
+                    ext_calls_raw = set()
+                    for c_ast in all_asts:
+                        for k, entry in c_ast.cp.items():
+                            if entry[0] == 'Class':
+                                c_str = c_ast.get_constant_string(k)
+                                if c_str and c_str.endswith('Fingerprint') and 'patches/' in c_str:
+                                    fp_refs.add(c_str)
+                            elif entry[0] == 'String':
+                                s_str = c_ast.get_constant_string(k)
+                                if s_str and ';->' in s_str:
+                                    ext_m = re.search(r'([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', s_str)
+                                    if ext_m:
+                                        ext_calls_raw.add(ext_m.group(1))
+                            elif entry[0] == 'Utf8':
+                                u_str = entry[1]
+                                if u_str.endswith('Fingerprint') and 'patches/' in u_str:
+                                    fp_refs.add(u_str.lstrip('L').rstrip(';'))
+                                elif ';->' in u_str:
+                                    ext_m = re.search(r'([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', u_str)
+                                    if ext_m:
+                                        ext_calls_raw.add(ext_m.group(1))
 
-                    ext_calls_raw = set(re.findall(rb'(?:L)?([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', combined_bytes))
-                    ext_calls = [e.decode("utf-8", errors="ignore").lstrip("L").rstrip(";") for e in ext_calls_raw]
+                    # Fallback to byte scan only if constant pool AST found no references
+                    if not fp_refs:
+                        fp_matches = re.findall(rb'(?:L)?(app/[a-zA-Z0-9_/]+/[a-zA-Z0-9_]+Fingerprint)', combined_bytes)
+                        fp_refs = set(m.decode("utf-8", errors="ignore") for m in fp_matches)
+
+                    if not ext_calls_raw:
+                        ext_matches = re.findall(rb'(?:L)?([a-zA-Z0-9_/]+;->[a-zA-Z0-9_<>$]+\([^\)]*\)[a-zA-Z0-9_/$;\[]*)', combined_bytes)
+                        ext_calls_raw = set(m.decode("utf-8", errors="ignore") for m in ext_matches)
+
+                    ext_calls = [e.lstrip("L").rstrip(";") for e in ext_calls_raw]
                     # Filter out non-extension calls or calls from other app tags
                     ext_calls = [
                         e for e in ext_calls
