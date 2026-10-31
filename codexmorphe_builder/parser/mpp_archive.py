@@ -102,10 +102,10 @@ class MppArchive:
                 if first_part in known_apps and first_part != app_tag:
                     continue
 
-                # 3. Handle localized string tables (addresources/values-<lang>/<target>/strings.xml)
+                # 3. Handle localized value tables (addresources/values-<lang>/<target>/*.xml: strings, arrays)
                 if name.startswith("addresources/"):
                     parts = name.split("/")
-                    if len(parts) >= 4 and parts[3] == "strings.xml":
+                    if len(parts) >= 4 and parts[3].endswith(".xml"):
                         val_qualifier = parts[1]
                         target = parts[2].lower()
                         if target in allowed_targets:
@@ -118,11 +118,21 @@ class MppArchive:
                                 lambda m: f'<string {m.group(1)} formatted="false">{m.group(2)}</string>' if 'formatted=' not in m.group(1) else m.group(0),
                                 raw_xml
                             )
-                            out_file = val_dir / f"strings_{target}.xml"
+                            fixed_xml = re.sub(
+                                r'<item\s*([^>]*?)>([^<]*?%[^<]*?)</item>',
+                                lambda m: f'<item {m.group(1)} formatted="false">{m.group(2)}</item>' if 'formatted=' not in m.group(1) else m.group(0),
+                                fixed_xml
+                            )
+                            xml_stem = parts[3].replace(".xml", "")
+                            out_file = val_dir / f"{xml_stem}_{target}.xml"
                             out_file.write_text(fixed_xml, encoding="utf-8")
                     continue
 
                 # 4. Handle standard Android resource types (drawables, layouts, raw, anim, color)
+                # Skip /host/ layout fragments which are offline splicing templates
+                if "/host/" in name:
+                    continue
+
                 for res_type in ("drawable", "layout", "raw", "anim", "color"):
                     marker = f"/{res_type}/"
                     idx = name.find(marker)

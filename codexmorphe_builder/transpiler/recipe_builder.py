@@ -803,7 +803,14 @@ def generate_hook_recipe_json(
                     patch_name = next((s for s in p_strings if 3 < len(s) < 40 and not s.startswith("L") and not s.startswith("$") and " " in s), "")
 
                     # Extract all BSM templates and direct AST fingerprint bindings
-                    ast_fp_bindings: Dict[str, Tuple[str, str]] = {}
+                    ast_fp_bindings: Dict[str, List[Tuple[str, str]]] = {}
+
+                    def record_binding(fp_k: str, ext_k: str, ctx_k: str):
+                        if fp_k not in ast_fp_bindings:
+                            ast_fp_bindings[fp_k] = []
+                        if not any(e == ext_k for e, _ in ast_fp_bindings[fp_k]):
+                            ast_fp_bindings[fp_k].append((ext_k, ctx_k))
+
                     for c_ast in all_asts:
                         bsms = c_ast.bootstrap_methods
                         for (m_name, _), code in c_ast.methods.items():
@@ -834,7 +841,7 @@ def generate_hook_recipe_json(
                                             if ext_m:
                                                 ext_str = ext_m.group(1).lstrip('L').rstrip(';')
                                                 if is_extension_package(ext_str.split('->')[0]):
-                                                    ast_fp_bindings[last_fp_name] = (ext_str, s_val)
+                                                    record_binding(last_fp_name, ext_str, s_val)
                                 elif op == 0x13 and idx + 2 < len(code):  # ldc_w
                                     s_idx, = struct.unpack_from('>H', code, idx+1); idx += 3
                                     s_entry = c_ast.cp.get(s_idx)
@@ -848,7 +855,7 @@ def generate_hook_recipe_json(
                                             if ext_m:
                                                 ext_str = ext_m.group(1).lstrip('L').rstrip(';')
                                                 if is_extension_package(ext_str.split('->')[0]):
-                                                    ast_fp_bindings[last_fp_name] = (ext_str, s_val)
+                                                    record_binding(last_fp_name, ext_str, s_val)
                                 elif op == 0xba and idx + 4 < len(code):  # invokedynamic
                                     id_idx, = struct.unpack_from('>H', code, idx+1); idx += 5
                                     entry = c_ast.cp.get(id_idx)
@@ -862,7 +869,7 @@ def generate_hook_recipe_json(
                                                     if ext_match and last_fp_name:
                                                         ext_str = ext_match.group(1).lstrip('L').rstrip(';')
                                                         if is_extension_package(ext_str.split('->')[0]):
-                                                            ast_fp_bindings[last_fp_name] = (ext_str, b_arg)
+                                                            record_binding(last_fp_name, ext_str, b_arg)
                                 elif op in (0xb7, 0xb8) and idx + 2 < len(code):  # invokespecial, invokestatic
                                     m_idx, = struct.unpack_from('>H', code, idx+1); idx += 3
                                     ref = c_ast.cp.get(m_idx)
@@ -878,10 +885,10 @@ def generate_hook_recipe_json(
                                                 m_str = next((s for s in reversed(last_ldc_strings) if s and ('/' not in s) and (';' not in s) and not s.startswith('$')), None)
                                                 if c_str and m_str:
                                                     clean_c = c_str.strip('L;')
-                                                    ast_fp_bindings[last_fp_name] = (f"{clean_c}->{m_str}(Landroid/view/View;)V", "")
+                                                    record_binding(last_fp_name, f"{clean_c}->{m_str}(Landroid/view/View;)V", "")
                                             elif is_extension_package(c_n) and m_name_str and last_fp_name:
                                                 ext_str = f"{c_n}->{m_name_str}{m_desc_str}".lstrip('L').rstrip(';')
-                                                ast_fp_bindings[last_fp_name] = (ext_str, "")
+                                                record_binding(last_fp_name, ext_str, "")
                                 else:
                                     idx += 1
 
@@ -962,84 +969,89 @@ def generate_hook_recipe_json(
                             if not ('ActivityHook' in e and 'initialize' in e and 'MainActivity' in target_cls)
                         ] or ext_calls
 
-                        # 1. Check exact AST binding first
-                        best_ext = None
-                        smali_ctx = all_text
+                        # 1. Check exact AST bindings first
+                        candidate_bindings: List[Tuple[str, str]] = []
                         if fp_name in ast_fp_bindings:
-                            best_ext, smali_ctx = ast_fp_bindings[fp_name]
+                            candidate_bindings = ast_fp_bindings[fp_name]
                         elif fp_simple in ast_fp_bindings:
-                            best_ext, smali_ctx = ast_fp_bindings[fp_simple]
+                            candidate_bindings = ast_fp_bindings[fp_simple]
 
-                        # 2. Match to best extension call by token overlap in available calls
-                        if not best_ext and available_ext_calls:
+                        # 2. Match to best extension call by token overlap in available calls if no AST bindings
+                        if not candidate_bindings and available_ext_calls:
                             words = [w for w in re.split(r'[^a-z0-9]', re.sub(r'([a-z])([A-Z])', r'\1 \2', fp_name).lower()) if len(w) > 3]
                             for ext in available_ext_calls:
                                 mtd = ext.split("->")[1].split("(")[0].lower()
                                 if any(w in mtd for w in words) or mtd in fp_name.lower() or fp_name.lower() in mtd:
-                                    best_ext = ext
+                                    candidate_bindings = [(ext, all_text)]
                                     break
-                            if not best_ext and len(available_ext_calls) == 1:
-                                best_ext = available_ext_calls[0]
+                            if not candidate_bindings and len(available_ext_calls) == 1:
+                                candidate_bindings = [(available_ext_calls[0], all_text)]
 
-                        if not best_ext or "->" not in best_ext or best_ext.endswith("->"):
-                            continue
-                        ext_parts = best_ext.split("->")
-                        ext_class_candidate = clean_type(ext_parts[0])
-                        ext_method_candidate = ext_parts[1].split("(")[0].strip()
-                        if not ext_method_candidate or not is_extension_package(ext_class_candidate):
-                            continue
-
-                        # Deduplicate identical (target_class, target_method, extension_call) hooks
-                        target_key = (target_cls, target_mtd, best_ext)
-                        if target_cls and target_mtd and target_key in seen_target_exts:
-                            continue
-
-                        patch_id_prefix = re.sub(r"[^a-z0-9]+", "_", (patch_name or pf.split("/")[-1]).lower())[:15]
-                        hook_id = f"{patch_id_prefix}_{fp_name.lower()}".strip("_")
-                        if hook_id in seen_hook_ids:
-                            continue
-
-                        action = classify_action_from_signature(
-                            best_ext,
-                            smali_ctx,
-                            target_method=target_mtd,
-                            target_return=fp_def.get('return_type', '')
-                        )
-
-                        # CRITICAL SAFETY GUARD:
-                        # An unconstrained query (*#* with no method and no strong strings)
-                        # must NEVER be mapped as RETURN_TRANSFORM or REPLACE!
-                        is_unconstrained = not target_cls and not target_mtd
-                        if is_unconstrained and action in ("RETURN_TRANSFORM", "REPLACE", "METHOD_REPLACE"):
-                            valid_strings = [s for s in fp_def.get('strings', []) if len(s) >= 6]
-                            if not valid_strings:
+                        for best_ext, smali_ctx in candidate_bindings:
+                            if not best_ext or "->" not in best_ext or best_ext.endswith("->"):
                                 continue
-                            action = "AFTER"
+                            ext_parts = best_ext.split("->")
+                            ext_class_candidate = clean_type(ext_parts[0])
+                            ext_method_candidate = ext_parts[1].split("(")[0].strip()
+                            if not ext_method_candidate or not is_extension_package(ext_class_candidate):
+                                continue
 
-                        # Guard against type mismatch in RETURN_TRANSFORM
-                        target_ret = clean_type(fp_def.get('return_type', ''))
-                        ext_ret = clean_type(best_ext.split(')')[-1]) if ')' in best_ext else ''
-                        if action == "RETURN_TRANSFORM" and target_ret and ext_ret:
-                            if target_ret != ext_ret and target_ret in ("boolean", "int", "void", "long", "float", "double"):
+                            # Deduplicate identical (target_class, target_method, extension_call) hooks
+                            target_key = (target_cls, target_mtd, best_ext)
+                            if target_cls and target_mtd and target_key in seen_target_exts:
+                                continue
+
+                            patch_id_prefix = re.sub(r"[^a-z0-9]+", "_", (patch_name or pf.split("/")[-1]).lower())[:15]
+                            hook_id = f"{patch_id_prefix}_{fp_name.lower()}".strip("_")
+                            if hook_id in seen_hook_ids:
+                                ext_suffix = re.sub(r"[^a-z0-9]+", "_", ext_method_candidate.lower())[:12]
+                                hook_id = f"{hook_id}_{ext_suffix}".strip("_")
+                            if hook_id in seen_hook_ids:
+                                hook_id = f"{hook_id}_{len(hooks)}"
+                            if hook_id in seen_hook_ids:
+                                continue
+
+                            action = classify_action_from_signature(
+                                best_ext,
+                                smali_ctx,
+                                target_method=target_mtd,
+                                target_return=fp_def.get('return_type', '')
+                            )
+
+                            # CRITICAL SAFETY GUARD:
+                            # An unconstrained query (*#* with no method and no strong strings)
+                            # must NEVER be mapped as RETURN_TRANSFORM or REPLACE!
+                            is_unconstrained = not target_cls and not target_mtd
+                            if is_unconstrained and action in ("RETURN_TRANSFORM", "REPLACE", "METHOD_REPLACE"):
+                                valid_strings = [s for s in fp_def.get('strings', []) if len(s) >= 6]
+                                if not valid_strings:
+                                    continue
                                 action = "AFTER"
 
-                        ext_class = clean_type(best_ext.split("->")[0]) if "->" in best_ext else None
-                        ext_method = best_ext.split("->")[1].split("(")[0].strip() if "->" in best_ext else None
+                            # Guard against type mismatch in RETURN_TRANSFORM
+                            target_ret = clean_type(fp_def.get('return_type', ''))
+                            ext_ret = clean_type(best_ext.split(')')[-1]) if ')' in best_ext else ''
+                            if action == "RETURN_TRANSFORM" and target_ret and ext_ret:
+                                if target_ret != ext_ret and target_ret in ("boolean", "int", "void", "long", "float", "double"):
+                                    action = "AFTER"
 
-                        hook_recipe: Dict[str, Any] = {
-                            "id": hook_id,
-                            "name": patch_name or fp_name,
-                            "action": action,
-                            "fingerprint": fp_def,
-                            "extension_call": best_ext,
-                            "extension_class": ext_class,
-                            "extension_method": ext_method
-                        }
+                            ext_class = clean_type(best_ext.split("->")[0]) if "->" in best_ext else None
+                            ext_method = best_ext.split("->")[1].split("(")[0].strip() if "->" in best_ext else None
 
-                        hooks.append(hook_recipe)
-                        seen_hook_ids.add(hook_id)
-                        if target_cls and target_mtd:
-                            seen_target_exts.add(target_key)
+                            hook_recipe: Dict[str, Any] = {
+                                "id": hook_id,
+                                "name": patch_name or fp_name,
+                                "action": action,
+                                "fingerprint": fp_def,
+                                "extension_call": best_ext,
+                                "extension_class": ext_class,
+                                "extension_method": ext_method
+                            }
+
+                            hooks.append(hook_recipe)
+                            seen_hook_ids.add(hook_id)
+                            if target_cls and target_mtd:
+                                seen_target_exts.add(target_key)
 
                     # --- Path B: Direct Targets / Non-Fingerprint Patches ---
                     if not fp_refs and ext_calls:
