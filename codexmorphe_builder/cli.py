@@ -128,16 +128,17 @@ def cmd_build(args: argparse.Namespace) -> None:
                 print("    [WARN] No .mpe extensions matched for this app tag.")
                 continue
 
-            # Step 2: Extract & compile Android XML/image resources (drawables, layouts, strings)
+            # Step 2: Extract & compile Android XML/image resources (drawables, layouts, strings) + assets
             res_dir = app_tmp_dir / "res"
-            archive.extract_resources_for_app(app_info.app_tag, res_dir)
+            assets_dir = app_tmp_dir / "assets"
+            archive.extract_resources_for_app(app_info.app_tag, res_dir, dest_assets_dir=assets_dir)
             resources_apk = compile_resources(res_dir, pkg, app_tmp_dir / "res_out")
             if resources_apk:
                 print(f"    ✓ Compiled resources container: {resources_apk.name} ({resources_apk.stat().st_size // 1024} KB)")
             else:
                 print("    [INFO] No binary resources compiled for this target.")
 
-            # Step 3: Package bundle APK as standard MultiDex + Compiled Resources + Dynamic Hook Recipes
+            # Step 3: Package bundle APK as standard MultiDex + Compiled Resources + Dynamic Hook Recipes + Assets
             hooks_json_str = generate_hook_recipe_json(
                 pkg,
                 app_info,
@@ -147,7 +148,13 @@ def cmd_build(args: argparse.Namespace) -> None:
             )
             bundle_filename = f"{pkg}-{src.id}-bundle.apk"
             output_bundle_apk = OUTPUT_DIR / bundle_filename
-            assemble_bundle_apk(extracted_mpe, resources_apk, output_bundle_apk, hooks_data=hooks_json_str)
+            assemble_bundle_apk(
+                extracted_mpe,
+                resources_apk,
+                output_bundle_apk,
+                hooks_data=hooks_json_str,
+                assets_dir=assets_dir
+            )
             total_compiled_bundles += 1
             print(f"    ✓ Emitted MultiDex bundle (with hooks.json): {bundle_filename} ({output_bundle_apk.stat().st_size // 1024} KB)")
 

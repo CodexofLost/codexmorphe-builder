@@ -126,11 +126,20 @@ def discover_compatible_apps(archive: MppArchive) -> Dict[str, DiscoveredApp]:
 
     # Incorporate applicable shared and all patch classes into each discovered app
     if shared_classes:
+        archive_apps = set(a.app_tag for a in discovered.values())
         for pkg, app in discovered.items():
+            other_apps = archive_apps - {app.app_tag}
             for s_cls in shared_classes:
-                # Exclude foreign shared domain patches (e.g. shared-youtube when building instagram)
-                if "youtube" in s_cls and app.app_tag not in ("youtube", "music"):
+                # Exclude foreign domain patches (e.g. shared patches targeting another specific app in this archive)
+                is_foreign = False
+                for other in other_apps:
+                    if f"/{other}/" in s_cls or f"-{other}" in s_cls:
+                        if not any(other in p_cls for p_cls in app.patch_classes):
+                            is_foreign = True
+                            break
+                if is_foreign:
                     continue
+
                 patch_name = clean_patch_name(s_cls)
                 patch_key = make_patch_key(patch_name)
                 patch_id = re.sub(r"[^a-z0-9]+", "_", patch_name.lower()).strip("_")

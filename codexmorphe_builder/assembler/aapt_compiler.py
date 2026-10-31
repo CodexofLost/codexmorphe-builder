@@ -8,6 +8,7 @@ from ..config import AAPT2_BIN, ANDROID_JAR
 DUMMY_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="{package_name}">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="34" />
     <application android:hasCode="false" />
 </manifest>
 """
@@ -51,7 +52,7 @@ def compile_resources(
 
     known_placeholders: Set[Tuple[str, str]] = set()
 
-    for iteration in range(6):
+    for iteration in range(12):
         # 1. Write current placeholders if any
         if known_placeholders:
             lines = ['<resources>']
@@ -92,6 +93,7 @@ def compile_resources(
             str(AAPT2_BIN), "link",
             "--shared-lib",
             "--auto-add-overlay",
+            "--min-sdk-version", "28",
             "-o", str(out_apk),
             "--manifest", str(manifest_path),
             "-I", str(jar),
@@ -101,9 +103,9 @@ def compile_resources(
         if res_link.returncode == 0 and out_apk.exists():
             return out_apk
 
-        # 4. Parse missing host symbols from link error output
-        missing_res = re.findall(r'resource (\w+)/(\w+) \(aka [^)]+\) not found', res_link.stderr)
-        missing_attrs = re.findall(r'attribute (\w+) \(aka [^)]+\) not found', res_link.stderr)
+        # 4. Parse missing host symbols from link error output (supports names with dots, hyphens, and style attributes)
+        missing_res = re.findall(r"resource '?(?:attr/)?(\w+)/([a-zA-Z0-9_.-]+)", res_link.stderr)
+        missing_attrs = re.findall(r"attribute '?(?:attr/)?([a-zA-Z0-9_.-]+) \(aka [^)]+\)'? not found", res_link.stderr)
 
         new_symbols = 0
         for r_type, r_name in missing_res:

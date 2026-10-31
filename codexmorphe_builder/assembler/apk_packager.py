@@ -9,12 +9,14 @@ def assemble_bundle_apk(
     resources_apk: Optional[Path],
     output_apk: Path,
     hooks_data: Optional[str] = None,
-    hooks_file: Optional[Path] = None
+    hooks_file: Optional[Path] = None,
+    assets_dir: Optional[Path] = None
 ) -> Path:
     """
     Assemble the final <packageName>-<source>-bundle.apk package using standard Android MultiDex.
     Packages extracted .mpe DEX files as classes.dex, classes2.dex, classes3.dex...
     Embeds hooks.json if provided so the client engine can execute patch recipes dynamically.
+    Packages raw assets into assets/ if provided.
     """
     output_apk.parent.mkdir(parents=True, exist_ok=True)
 
@@ -40,6 +42,16 @@ def assemble_bundle_apk(
         elif hooks_file and hooks_file.exists():
             apk.write(hooks_file, arcname="hooks.json")
             apk.write(hooks_file, arcname="assets/hooks.json")
+
+        # 4. Add raw assets from assets_dir into assets/
+        if assets_dir and assets_dir.exists():
+            for asset_file in assets_dir.rglob("*"):
+                if asset_file.is_file():
+                    rel_path = asset_file.relative_to(assets_dir)
+                    arcname = f"assets/{rel_path}".replace("\\", "/")
+                    # Avoid duplicate hooks.json
+                    if arcname != "assets/hooks.json":
+                        apk.write(asset_file, arcname=arcname)
 
     return output_apk
 

@@ -1,8 +1,16 @@
+import re
 import struct
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional, Set
+
+
+RES_DIR_PATTERN = re.compile(
+    r"^((?:drawable|layout|values|raw|anim|color|font|xml|mipmap|interpolator|transition)(?:-[a-zA-Z0-9+_-]+)?)$"
+)
+VALID_RESOURCE_EXTS = {".xml", ".png", ".webp", ".jpg", ".jpeg", ".json", ".svg", ".ttf", ".otf", ".lua", ".txt"}
+UNIVERSAL_SHARED_EXTS = {"shared", "shared-extension", "shared-gmscore", "extension"}
 
 
 @dataclass
@@ -17,7 +25,10 @@ class MppArchive:
     def from_file(cls, path: Path) -> "MppArchive":
         with zipfile.ZipFile(path, "r") as z:
             all_files = z.namelist()
-            extensions = [f for f in all_files if f.startswith("extensions/") and f.endswith(".mpe")]
+            extensions = [
+                f for f in all_files
+                if (f.endswith(".mpe") or (f.endswith(".dex") and "extension" in f and f != "classes.dex"))
+            ]
             resources = [f for f in all_files if f.startswith("addresources/") or f.startswith("res/")]
 
             dex_classes = []
@@ -33,37 +44,70 @@ class MppArchive:
             resource_files=resources
         )
 
+    def get_archive_apps(self) -> Set[str]:
+        """
+        Dynamically discover all target applications present in this archive from classes.dex.
+        Works across all 240+ apps without hardcoding any app names.
+        """
+        apps = set()
+        for c in self.dex_classes:
+            if "patches/" in c:
+                parts = c.strip("L;").replace("\\", "/").split("/")
+                try:
+                    p_idx = parts.index("patches")
+                    if p_idx + 1 < len(parts):
+                        tag = parts[p_idx + 1]
+                        if tag not in ("all", "shared", "util"):
+                            apps.add(tag)
+                except ValueError:
+                    pass
+        return apps
+
     def extract_extensions_for_app(self, app_tag: str, dest_dir: Path) -> List[Path]:
         """
-        Extract extensions following official Morphe specifications:
+        Extract extensions dynamically matching this application:
         1. Universal Shared Containers: 'extensions/all/*.mpe', 'shared.mpe', 'extension.mpe',
            'shared-extension.mpe', 'shared-gmscore.mpe'.
-        2. App-Family Shared Containers: 'shared-youtube.mpe' for YouTube and YouTube Music.
-        3. Single-Extension Repositories: If an archive contains only 1 non-shared extension,
+        2. Single-Extension Repositories: If an archive contains only 1 non-shared extension,
            it serves all apps in the bundle.
-        4. Strict Multi-App Domain Matching: Matches <app_tag>.mpe or shared-<app_tag>.mpe.
+        3. Exact and Family Matches: Matches <app_tag>.mpe, shared-<app_tag>.mpe, or extensions
+           referenced in bytecode by this app's patch classes.
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
         extracted = []
 
-        shared_stems = {"shared", "shared-extension", "shared-gmscore", "extension"}
-        non_shared_exts = [f for f in self.extension_files if Path(f).stem not in shared_stems and not f.startswith("extensions/all/")]
+        archive_apps = self.get_archive_apps()
+        other_apps = archive_apps - {app_tag}
+
+        non_shared_exts = [
+            f for f in self.extension_files
+            if Path(f).stem not in UNIVERSAL_SHARED_EXTS and not f.startswith("extensions/all/")
+        ]
 
         with zipfile.ZipFile(self.path, "r") as z:
+            # Collect patch class bytecode for this app to detect referenced extensions
+            app_bytes = b"".join(
+                z.read(n) for n in z.namelist()
+                if f"/patches/{app_tag}/" in n and n.endswith(".class")
+            )
+
             for ext in self.extension_files:
                 ext_name = Path(ext).stem
 
                 is_all_ext = ext.startswith("extensions/all/") or "/all/" in ext
-                is_shared_base = ext_name in shared_stems
-                is_shared_youtube = (app_tag in ("youtube", "music") and ext_name == "shared-youtube")
-                is_sole_app_ext = len(non_shared_exts) == 1 and len(self.extension_files) == 1
+                is_shared_base = ext_name in UNIVERSAL_SHARED_EXTS
+                is_sole_app_ext = (len(non_shared_exts) <= 1)
                 is_app_match = (
                     ext_name == app_tag
                     or ext_name == f"shared-{app_tag}"
                     or ext_name.endswith(f"-{app_tag}")
                 )
+                # If extension belongs explicitly to another app in this archive, do not bundle it
+                is_foreign_app = (ext_name in other_apps or any(ext_name.endswith(f"-{o}") for o in other_apps))
+                # Check if referenced dynamically in bytecode (e.g. shared-youtube referenced by music)
+                is_referenced = (not is_foreign_app and ext_name.encode() in app_bytes)
 
-                if is_all_ext or is_shared_base or is_shared_youtube or is_sole_app_ext or is_app_match:
+                if is_all_ext or is_shared_base or is_sole_app_ext or is_app_match or is_referenced:
                     out_path = dest_dir / f"{ext_name}.dex"
                     with open(out_path, "wb") as out:
                         out.write(z.read(ext))
@@ -71,44 +115,93 @@ class MppArchive:
 
         return extracted
 
-    def extract_resources_for_app(self, app_tag: str, dest_res_dir: Path) -> Path:
+    def extract_resources_for_app(
+        self,
+        app_tag: str,
+        dest_res_dir: Path,
+        dest_assets_dir: Optional[Path] = None
+    ) -> Path:
         """
-        Extract XML layouts, vector/raster drawables, localized strings, and raw assets
-        matching this application's inheritance chain into a standard Android res/ directory.
+        Extract XML layouts, vector/raster drawables, localized strings, typography fonts,
+        and raw assets matching this application's inheritance chain into a standard Android res/ directory.
+        Derives feature associations dynamically without hardcoding app names.
         """
-        import re
-
         dest_res_dir.mkdir(parents=True, exist_ok=True)
-        allowed_targets = {"shared", "all", app_tag, f"shared-{app_tag}"}
-        if app_tag in ("youtube", "music"):
-            allowed_targets.add("sponsorblock")
-            allowed_targets.add("shared-youtube")
+        if dest_assets_dir:
+            dest_assets_dir.mkdir(parents=True, exist_ok=True)
 
-        valid_exts = {".xml", ".png", ".webp", ".jpg", ".jpeg", ".json", ".svg"}
-        known_apps = {"youtube", "music", "reddit", "instagram", "twitter", "waze", "twitch"}
+        archive_apps = self.get_archive_apps()
+        other_apps = archive_apps - {app_tag}
 
         with zipfile.ZipFile(self.path, "r") as z:
+            app_bytes = b"".join(
+                z.read(n) for n in z.namelist()
+                if f"/patches/{app_tag}/" in n and n.endswith(".class")
+            )
+            other_bytes = {
+                o: b"".join(z.read(n) for n in z.namelist() if f"/patches/{o}/" in n and n.endswith(".class"))
+                for o in other_apps
+            }
+
             for name in z.namelist():
-                # 1. Skip non-resource files and excluded branding
+                # 1. Skip non-resource files, directory entries, and excluded branding
                 if name.endswith("/") or name.startswith("META-INF/") or name.startswith("patches/"):
                     continue
                 if name.startswith("custom-branding/") or "branding" in name.lower() and ("icon" in name.lower() or "logo" in name.lower()):
                     continue
-                if Path(name).suffix.lower() not in valid_exts:
+                if "/host/" in name:
                     continue
 
-                # 2. Check if file is isolated under a foreign app root (e.g. twitter/ when app_tag is instagram)
-                first_part = name.split("/")[0].lower()
-                if first_part in known_apps and first_part != app_tag:
+                ext = "." + name.split(".")[-1].lower() if "." in name else ""
+                if ext not in VALID_RESOURCE_EXTS:
                     continue
 
-                # 3. Handle localized value tables (addresources/values-<lang>/<target>/*.xml: strings, arrays)
+                parts = name.split("/")
+                first = parts[0].lower()
+
+                # 2. Skip files rooted under a foreign application's directory
+                if first in other_apps:
+                    continue
+
+                # 3. Dynamic feature membership check
+                first_clean = first.replace("-", "").replace("_", "")
+                first_in_this = (first.encode() in app_bytes or first_clean.encode() in app_bytes)
+                first_in_other = any(first.encode() in ob or first_clean.encode() in ob for ob in other_bytes.values())
+
+                if first in ("shared", "all", "res", "settings") or first == app_tag or first.startswith(f"{app_tag}-"):
+                    allowed = True
+                elif first_in_this:
+                    allowed = True
+                elif first_in_other:
+                    allowed = False
+                else:
+                    allowed = True
+
+                if not allowed:
+                    continue
+
+                # 4. Handle localized value tables (addresources/values-<lang>/<target>/*.xml: strings, arrays)
                 if name.startswith("addresources/"):
-                    parts = name.split("/")
                     if len(parts) >= 4 and parts[3].endswith(".xml"):
                         val_qualifier = parts[1]
                         target = parts[2].lower()
-                        if target in allowed_targets:
+                        target_clean = target.replace("-", "").replace("_", "")
+                        target_in_this = (target.encode() in app_bytes or target_clean.encode() in app_bytes)
+                        target_in_other = any(target.encode() in ob or target_clean.encode() in ob for ob in other_bytes.values())
+
+                        target_allowed = False
+                        if target in other_apps:
+                            target_allowed = False
+                        elif target in ("shared", "all") or target == app_tag or target.startswith(f"{app_tag}-"):
+                            target_allowed = True
+                        elif target_in_this:
+                            target_allowed = True
+                        elif target_in_other:
+                            target_allowed = False
+                        else:
+                            target_allowed = True
+
+                        if target_allowed:
                             val_dir = dest_res_dir / val_qualifier
                             val_dir.mkdir(parents=True, exist_ok=True)
                             raw_xml = z.read(name).decode("utf-8", errors="ignore")
@@ -128,23 +221,30 @@ class MppArchive:
                             out_file.write_text(fixed_xml, encoding="utf-8")
                     continue
 
-                # 4. Handle standard Android resource types (drawables, layouts, raw, anim, color)
-                # Skip /host/ layout fragments which are offline splicing templates
-                if "/host/" in name:
+                # 5. Handle raw assets (e.g. actionbar/assets/animated_like_icon_dark_v4.json, waze skins)
+                if "assets" in parts and dest_assets_dir is not None:
+                    asset_idx = parts.index("assets")
+                    rel_asset_path = Path(*parts[asset_idx + 1:])
+                    out_asset = dest_assets_dir / rel_asset_path
+                    out_asset.parent.mkdir(parents=True, exist_ok=True)
+                    with open(out_asset, "wb") as out:
+                        out.write(z.read(name))
                     continue
 
-                for res_type in ("drawable", "layout", "raw", "anim", "color"):
-                    marker = f"/{res_type}/"
-                    idx = name.find(marker)
-                    if idx != -1:
-                        filename = name[idx + len(marker):]
-                        if filename and not filename.endswith("/"):
-                            target_type_dir = dest_res_dir / res_type
-                            target_type_dir.mkdir(parents=True, exist_ok=True)
-                            out_target_file = target_type_dir / Path(filename).name
-                            with open(out_target_file, "wb") as out:
-                                out.write(z.read(name))
+                # 6. Handle standard & qualified Android resource directories (drawables, layouts, fonts, mipmaps, raw, anim, color, xml)
+                res_dir_idx = -1
+                for i, p in enumerate(parts[:-1]):
+                    if RES_DIR_PATTERN.match(p):
+                        res_dir_idx = i
                         break
+
+                if res_dir_idx != -1:
+                    res_type_dir = parts[res_dir_idx]
+                    target_type_dir = dest_res_dir / res_type_dir
+                    target_type_dir.mkdir(parents=True, exist_ok=True)
+                    out_target_file = target_type_dir / Path(name).name
+                    with open(out_target_file, "wb") as out:
+                        out.write(z.read(name))
 
         return dest_res_dir
 
