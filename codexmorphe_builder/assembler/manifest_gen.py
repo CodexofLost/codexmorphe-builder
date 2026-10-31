@@ -43,6 +43,7 @@ class BundleManifestGenerator:
         try:
             with open(manifest_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+                loaded_apps = 0
                 for pkg, app_data in data.get("apps", {}).items():
                     entry = AppCatalogEntry(
                         package_name=pkg,
@@ -52,6 +53,9 @@ class BundleManifestGenerator:
                     for src_id, prov_data in app_data.get("providers", {}).items():
                         entry.providers[src_id] = ProviderBundleInfo(**prov_data)
                     self.catalog[pkg] = entry
+                    loaded_apps += 1
+                if loaded_apps > 0:
+                    print(f"[INFO] Loaded existing manifest with {loaded_apps} app(s) across {sum(len(e.providers) for e in self.catalog.values())} bundle(s)")
         except Exception as e:
             print(f"[WARN] Failed to load existing manifest: {e}")
 
@@ -98,6 +102,10 @@ class BundleManifestGenerator:
 
     def write_manifest(self, filename: str = "bundle-manifest.json") -> Path:
         manifest_path = self.output_dir / filename
+        if not self.catalog and manifest_path.exists():
+            print(f"[WARN] Catalog is empty but existing {filename} exists on disk. Preserving existing manifest.")
+            return manifest_path
+
         data = {
             "version": 1,
             "generated_at": datetime.now(timezone.utc).isoformat(),

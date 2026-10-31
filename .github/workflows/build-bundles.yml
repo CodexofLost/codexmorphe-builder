@@ -92,6 +92,9 @@ jobs:
           # Ensure dist/ workspace is clean of any legacy or unflavored artifacts
           rm -rf dist/
           mkdir -p dist/
+          # Download existing release manifest so incremental builds retain all existing applications
+          gh release download bundles -p "bundle-manifest.json" -D dist/ 2>/dev/null || true
+
           BUILD_FLAGS="--changed-only"
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event.inputs.force_rebuild }}" = "true" ]; then
             echo "Trigger is push or force_rebuild: compiling all bundles with latest builder..."
@@ -135,10 +138,15 @@ jobs:
             return 0
           }
 
-          # 2. Upload manifest catalog first so client always has immediate access
+          # 2. Upload manifest catalog only if valid and non-empty
           if [ -f "dist/bundle-manifest.json" ]; then
-            echo "Initial upsert of dist/bundle-manifest.json..."
-            upload_asset "dist/bundle-manifest.json"
+            APPS_COUNT=$(python3 -c "import json; print(len(json.load(open('dist/bundle-manifest.json')).get('apps', {})))" 2>/dev/null || echo 0)
+            if [ "$APPS_COUNT" -gt 0 ]; then
+              echo "Upserting dist/bundle-manifest.json ($APPS_COUNT apps)..."
+              upload_asset "dist/bundle-manifest.json"
+            else
+              echo "CRITICAL: dist/bundle-manifest.json contains 0 apps! Skipping upload to protect existing release manifest."
+            fi
           fi
 
           # 3. Upload compiled author-flavored bundles with in-place upsert
@@ -151,7 +159,10 @@ jobs:
 
           # 4. Upload updated manifest catalog again to ensure latest hashes and timestamps
           if [ -f "dist/bundle-manifest.json" ]; then
-            echo "Final upsert of dist/bundle-manifest.json..."
-            upload_asset "dist/bundle-manifest.json"
+            APPS_COUNT=$(python3 -c "import json; print(len(json.load(open('dist/bundle-manifest.json')).get('apps', {})))" 2>/dev/null || echo 0)
+            if [ "$APPS_COUNT" -gt 0 ]; then
+              echo "Final upsert of dist/bundle-manifest.json ($APPS_COUNT apps)..."
+              upload_asset "dist/bundle-manifest.json"
+            fi
           fi
           echo "✓ Rolling release update complete."
