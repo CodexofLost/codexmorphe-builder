@@ -121,17 +121,24 @@ def cmd_build(args: argparse.Namespace) -> None:
 
             # Step 1: Extract extension .mpe files
             ext_dir = app_tmp_dir / "extensions"
-            extracted_mpe = archive.extract_extensions_for_app(app_info.app_tag, ext_dir)
+            extracted_mpe = archive.extract_extensions_for_app(
+                app_info.app_tag,
+                ext_dir,
+                app_pkg=pkg,
+                patch_classes=app_info.patch_classes
+            )
             print(f"    Extracted {len(extracted_mpe)} extension .mpe file(s)")
-
-            if not extracted_mpe:
-                print("    [WARN] No .mpe extensions matched for this app tag.")
-                continue
 
             # Step 2: Extract & compile Android XML/image resources (drawables, layouts, strings) + assets
             res_dir = app_tmp_dir / "res"
             assets_dir = app_tmp_dir / "assets"
-            archive.extract_resources_for_app(app_info.app_tag, res_dir, dest_assets_dir=assets_dir)
+            archive.extract_resources_for_app(
+                app_info.app_tag,
+                res_dir,
+                dest_assets_dir=assets_dir,
+                app_pkg=pkg,
+                patch_classes=app_info.patch_classes
+            )
             resources_apk = compile_resources(res_dir, pkg, app_tmp_dir / "res_out")
             if resources_apk:
                 print(f"    ✓ Compiled resources container: {resources_apk.name} ({resources_apk.stat().st_size // 1024} KB)")

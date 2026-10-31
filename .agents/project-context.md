@@ -25,11 +25,12 @@ synced_at: "2026-10-30T20:40:00Z"
 | **CLI Dispatcher** | `codexmorphe_builder/cli.py` | Command parser for `fetch`, `list`, `build`, `test`, `clean`. |
 | **Source Registry & Fetcher** | `codexmorphe_builder/fetcher/release_client.py` | Scans `sources/*.json`, queries GitHub API / URLs, manages ETag & SHA256 caching. |
 | **Cache Ledger** | `codexmorphe_builder/fetcher/cache_ledger.py` | Tracks `.cache/build-ledger.json` to prevent duplicate downloads and CI runs. |
-| **MPP Archive Parser** | `codexmorphe_builder/parser/mpp_archive.py` | Inspects `.mpp` ZIP container: extracts DEX, `.mpe` extensions, resources. |
-| **Compatibility Catalog** | `codexmorphe_builder/parser/compatibility.py` | Discovers target app package IDs and supported versions from DEX compatibility records. |
+| **MPP Archive Parser** | `codexmorphe_builder/parser/mpp_archive.py` | Inspects `.mpp` ZIP container: extracts DEX, `.mpe` extensions, scoped XML/drawable resources with foreign app isolation. |
+| **JVM Classfile AST Parser** | `codexmorphe_builder/parser/classfile_ast.py` | Pure Python parser for JVM Classfile format (constant pool, attributes, methods, code bytecode). |
+| **Compatibility Catalog** | `codexmorphe_builder/parser/compatibility.py` | Discovers target app package IDs via `Compatibility` constructor scanning, resolves recursive `dependsOn` standalone patch closures, and discards universal repackaging patches. |
 | **Redundancy Filter** | `codexmorphe_builder/filter/root_filter.py` | Strips root/LSPosed redundant patches (`GmsCore`, `CloneApp`, `SpoofSignature`, PairIP anti-tamper). |
-| **Universal AST Transpiler** | `codexmorphe_builder/transpiler/recipe_builder.py` | Maps Morphe bytecode mutations to Xposed/DexKit hook patterns, enforces lifecycle safety, framework class filtering, companion scanning, and hook deduplication. |
-| **Bundle Assembler** | `codexmorphe_builder/assembler/apk_packager.py` | Packages MultiDex `.mpe` files, AAPT2 resources, and dual `hooks.json` / `assets/hooks.json`. |
+| **Universal AST Transpiler** | `codexmorphe_builder/transpiler/recipe_builder.py` | Maps Morphe bytecode mutations to Xposed/DexKit hook patterns for scoped patch closures, enforces lifecycle safety, framework class filtering, companion scanning, and hook deduplication. |
+| **Bundle Assembler** | `codexmorphe_builder/assembler/apk_packager.py` | Packages MultiDex `.mpe` files (with empty DEX fallback), AAPT2 resources, and dual `hooks.json` / `assets/hooks.json`. |
 | **Manifest Generator** | `codexmorphe_builder/assembler/manifest_gen.py` | Emits `bundle-manifest.json` indexing all providers, versions, and bundle SHA256 checksums. |
 
 ### Critical Execution Traces
@@ -47,6 +48,10 @@ synced_at: "2026-10-30T20:40:00Z"
 
 ## 4. Architectural Invariants & Guardrails
 
+* **Dynamic Compatibility Discovery (Zero Hardcoded Maps):** Package names and display names must be parsed dynamically from `app.morphe.patcher.patch.Compatibility` bytecode constructor calls in `.mpp` archives. Never derive package identities by parsing folder path segments.
+* **Standalone Autonomy & Closure Resolution:** Every app bundle must be 100% standalone, resolving all required transitive patch dependencies (`dependsOn`), shared extensions (`shared.mpe`, `shared-youtube.mpe`), and shared resources into each app bundle with zero inter-bundle coupling.
+* **Universal Repackaging Patch Exclusion:** Discard standalone offline repackaging patches (`/patches/all/`, `CloneApp`, `SpoofSignature`, `EnableAndroidDebugging`, etc.) because dynamic LSPosed hooking operates on genuine installed packages and does not require APK repackaging hacks.
+* **Foreign App Resource Isolation:** Prioritize foreign app rejection when extracting XML and drawable resources from `.mpp` archives to prevent AAPT2 identifier collisions across sibling apps.
 * **Zero Custom Recipes:** Never hand-write app-specific hook recipes. All hooks must be generated automatically by the AST Transpiler from the `.mpp` patch bytecode.
 * **Universal Transpilation Safety:**
   * `Discriminator Validation & Wildcard Guard`: Reject any fingerprint or hook lacking `method_name`, `strings`, or `literal` to prevent DexKit from matching every method declared in the class.

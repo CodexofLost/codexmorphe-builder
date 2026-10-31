@@ -12,6 +12,7 @@ RES_DIR_PATTERN = re.compile(
 )
 VALID_RESOURCE_EXTS = {".xml", ".png", ".webp", ".jpg", ".jpeg", ".json", ".svg", ".ttf", ".otf", ".lua", ".txt"}
 UNIVERSAL_SHARED_EXTS = {"shared", "shared-extension", "shared-gmscore", "extension"}
+GENERIC_SEGMENTS = {"com", "org", "net", "android", "app", "apps", "google", "io", "in"}
 
 
 @dataclass
@@ -47,8 +48,7 @@ class MppArchive:
 
     def get_archive_apps(self) -> Set[str]:
         """
-        Dynamically discover all target applications present in this archive from classes.dex.
-        Works across all 240+ apps without hardcoding any app names.
+        Dynamically discover target application tags present in this archive.
         """
         apps = set()
         for c in self.dex_classes:
@@ -60,25 +60,43 @@ class MppArchive:
                         tag = parts[p_idx + 1]
                         if tag not in ("all", "shared", "util"):
                             apps.add(tag)
+                    if p_idx > 0:
+                        prev = parts[p_idx - 1]
+                        if prev not in ("app", "morphe", "template", "crimera"):
+                            apps.add(prev)
                 except ValueError:
                     pass
         return apps
 
-    def extract_extensions_for_app(self, app_tag: str, dest_dir: Path) -> List[Path]:
+    def extract_extensions_for_app(
+        self,
+        app_tag: str,
+        dest_dir: Path,
+        app_pkg: Optional[str] = None,
+        patch_classes: Optional[List[str]] = None
+    ) -> List[Path]:
         """
         Extract extensions dynamically matching this application:
-        1. Universal Shared Containers: 'extensions/all/*.mpe', 'shared.mpe', 'extension.mpe',
-           'shared-extension.mpe', 'shared-gmscore.mpe'.
-        2. Single-Extension Repositories: If an archive contains only 1 non-shared extension,
-           it serves all apps in the bundle.
-        3. Exact and Family Matches: Matches <app_tag>.mpe, shared-<app_tag>.mpe, or extensions
-           referenced in bytecode by this app's patch classes.
+        1. Universal Shared Containers: 'shared.mpe', 'extension.mpe', 'shared-gmscore.mpe',
+           or anything in 'extensions/all/'.
+        2. Shared Family Extensions: 'shared-<family>.mpe' (e.g. 'shared-youtube.mpe') when
+           referenced by the app or belonging to the app family.
+        3. Exact and Slug Matches: <app_tag>.mpe, <slug>.mpe.
+        4. Bytecode References: Any extension referenced in the bytecode of the app's patch closure.
+        5. Single-Extension Repositories: If only 1 non-shared extension exists, it serves all apps.
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
         extracted = []
 
         archive_apps = self.get_archive_apps()
         other_apps = archive_apps - {app_tag}
+
+        meaningful_segments: Set[str] = set()
+        if app_pkg:
+            meaningful_segments.update(
+                s.lower() for s in app_pkg.split(".") if s.lower() not in GENERIC_SEGMENTS
+            )
+        meaningful_segments.add(app_tag.lower())
 
         non_shared_exts = [
             f for f in self.extension_files
@@ -87,28 +105,40 @@ class MppArchive:
 
         with zipfile.ZipFile(self.path, "r") as z:
             # Collect patch class bytecode for this app to detect referenced extensions
-            app_bytes = b"".join(
-                z.read(n) for n in z.namelist()
-                if f"/patches/{app_tag}/" in n and n.endswith(".class")
-            )
+            if patch_classes:
+                app_bytes = b"".join(
+                    z.read(f"{c}.class") for c in patch_classes if f"{c}.class" in self.all_files
+                )
+            else:
+                app_bytes = b"".join(
+                    z.read(n) for n in z.namelist()
+                    if (f"/patches/{app_tag}/" in n or any(f"/{s}/" in n for s in meaningful_segments))
+                    and n.endswith(".class")
+                )
 
             for ext in self.extension_files:
                 ext_name = Path(ext).stem
+                ext_lower = ext_name.lower()
 
                 is_all_ext = ext.startswith("extensions/all/") or "/all/" in ext
-                is_shared_base = ext_name in UNIVERSAL_SHARED_EXTS
+                is_shared_base = ext_lower in UNIVERSAL_SHARED_EXTS
                 is_sole_app_ext = (len(non_shared_exts) <= 1)
+
+                is_shared_family = ext_lower.startswith("shared-")
+
+                # Check if exact app match or family match
                 is_app_match = (
-                    ext_name == app_tag
-                    or ext_name == f"shared-{app_tag}"
-                    or ext_name.endswith(f"-{app_tag}")
+                    ext_lower == app_tag.lower()
+                    or (is_shared_family and any(s in ext_lower for s in meaningful_segments))
                 )
-                # If extension belongs explicitly to another app in this archive, do not bundle it
-                is_foreign_app = (ext_name in other_apps or any(ext_name.endswith(f"-{o}") for o in other_apps))
-                # Check if referenced dynamically in bytecode (e.g. shared-youtube referenced by music)
+
+                # An extension is foreign if its name strictly equals another app tag in this archive
+                is_foreign_app = (ext_lower in other_apps and ext_lower != app_tag.lower())
+
+                # Check if referenced dynamically in bytecode
                 is_referenced = (not is_foreign_app and ext_name.encode() in app_bytes)
 
-                if is_all_ext or is_shared_base or is_sole_app_ext or is_app_match or is_referenced:
+                if is_all_ext or is_shared_base or is_sole_app_ext or (is_app_match and not is_foreign_app) or is_referenced:
                     out_path = dest_dir / f"{ext_name}.dex"
                     with open(out_path, "wb") as out:
                         out.write(z.read(ext))
@@ -120,7 +150,9 @@ class MppArchive:
         self,
         app_tag: str,
         dest_res_dir: Path,
-        dest_assets_dir: Optional[Path] = None
+        dest_assets_dir: Optional[Path] = None,
+        app_pkg: Optional[str] = None,
+        patch_classes: Optional[List[str]] = None
     ) -> Path:
         """
         Extract XML layouts, vector/raster drawables, localized strings, typography fonts,
@@ -134,11 +166,25 @@ class MppArchive:
         archive_apps = self.get_archive_apps()
         other_apps = archive_apps - {app_tag}
 
-        with zipfile.ZipFile(self.path, "r") as z:
-            app_bytes = b"".join(
-                z.read(n) for n in z.namelist()
-                if f"/patches/{app_tag}/" in n and n.endswith(".class")
+        meaningful_segments: Set[str] = set()
+        if app_pkg:
+            meaningful_segments.update(
+                s.lower() for s in app_pkg.split(".") if s.lower() not in GENERIC_SEGMENTS
             )
+        meaningful_segments.add(app_tag.lower())
+
+        with zipfile.ZipFile(self.path, "r") as z:
+            if patch_classes:
+                app_bytes = b"".join(
+                    z.read(f"{c}.class") for c in patch_classes if f"{c}.class" in self.all_files
+                )
+            else:
+                app_bytes = b"".join(
+                    z.read(n) for n in z.namelist()
+                    if (f"/patches/{app_tag}/" in n or any(f"/{s}/" in n for s in meaningful_segments))
+                    and n.endswith(".class")
+                )
+
             other_bytes = {
                 o: b"".join(z.read(n) for n in z.namelist() if f"/patches/{o}/" in n and n.endswith(".class"))
                 for o in other_apps
@@ -147,11 +193,16 @@ class MppArchive:
             host_ids: Set[str] = set()
 
             for name in z.namelist():
-                # 1. Skip non-resource files, directory entries, and patches
-                if name.endswith("/") or name.startswith("META-INF/") or name.startswith("patches/"):
+                # Skip non-resource files, directory entries, extensions, and patches
+                if (
+                    name.endswith("/")
+                    or name.startswith("META-INF/")
+                    or name.startswith("patches/")
+                    or name.endswith(".mpe")
+                ):
                     continue
 
-                # Collect declared resource IDs from /host/ layout templates (e.g. morphe_external_download_button)
+                # Collect declared resource IDs from /host/ layout templates
                 if "/host/" in name:
                     if name.endswith(".xml"):
                         try:
@@ -169,16 +220,21 @@ class MppArchive:
                 parts = name.split("/")
                 first = parts[0].lower()
 
-                # 2. Skip files rooted under a foreign application's directory
-                if first in other_apps:
+                # Skip files rooted under a foreign application's directory
+                if any(first == o or first.startswith(f"{o}-") for o in other_apps) and not (
+                    first == app_tag.lower() or first.startswith(f"{app_tag.lower()}-")
+                ):
                     continue
 
-                # 3. Dynamic feature membership check
+                # Dynamic feature membership check
                 first_clean = first.replace("-", "").replace("_", "")
                 first_in_this = (first.encode() in app_bytes or first_clean.encode() in app_bytes)
                 first_in_other = any(first.encode() in ob or first_clean.encode() in ob for ob in other_bytes.values())
 
-                if first in ("shared", "all", "res", "settings") or first == app_tag or first.startswith(f"{app_tag}-"):
+                is_universal_root = first in ("shared", "all", "res", "settings")
+                is_app_root = first in meaningful_segments or any(first.startswith(f"{s}-") for s in meaningful_segments)
+
+                if is_universal_root or is_app_root:
                     allowed = True
                 elif first_in_this:
                     allowed = True
@@ -190,7 +246,9 @@ class MppArchive:
                 if not allowed:
                     continue
 
-                # 4. Handle localized value tables (addresources/values-<lang>/<target>/*.xml: strings, arrays)
+                # -------------------------------------------------------------
+                # Handle localized value tables (addresources/values-<lang>/<target>/*.xml)
+                # -------------------------------------------------------------
                 if name.startswith("addresources/"):
                     if len(parts) >= 4 and parts[3].endswith(".xml"):
                         val_qualifier = parts[1]
@@ -200,9 +258,21 @@ class MppArchive:
                         target_in_other = any(target.encode() in ob or target_clean.encode() in ob for ob in other_bytes.values())
 
                         target_allowed = False
-                        if target in other_apps:
+                        is_foreign_target = any(
+                            target == o or target.startswith(f"{o}-") for o in other_apps
+                        ) and not (
+                            target == app_tag.lower() or target.startswith(f"{app_tag.lower()}-")
+                        )
+
+                        if is_foreign_target:
                             target_allowed = False
-                        elif target in ("shared", "all") or target == app_tag or target.startswith(f"{app_tag}-"):
+                        elif target in ("shared", "all"):
+                            target_allowed = True
+                        elif target == app_tag.lower():
+                            target_allowed = True
+                        elif target.startswith("shared-") and any(s in target for s in meaningful_segments):
+                            target_allowed = True
+                        elif target in meaningful_segments or any(target.startswith(f"{s}-") for s in meaningful_segments):
                             target_allowed = True
                         elif target_in_this:
                             target_allowed = True
@@ -215,97 +285,108 @@ class MppArchive:
                             val_dir = dest_res_dir / val_qualifier
                             val_dir.mkdir(parents=True, exist_ok=True)
                             raw_xml = z.read(name).decode("utf-8", errors="ignore")
-                            # Sanitize unescaped % tokens via XML DOM AST for strict AAPT2 compliance
                             fixed_xml = raw_xml
                             try:
-                                root = ET.fromstring(raw_xml)
-                                modified = False
-                                for elem in root.iter():
-                                    if elem.tag in ("string", "item") and elem.text and "%" in elem.text:
-                                        if "formatted" not in elem.attrib:
-                                            elem.set("formatted", "false")
-                                            modified = True
-                                if modified:
-                                    fixed_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
-                            except ET.ParseError:
-                                # Fallback regex for non-standard XML fragments
-                                fixed_xml = re.sub(
-                                    r'<string\s+([^>]*?)>([^<]*?%[^<]*?)</string>',
-                                    lambda m: f'<string {m.group(1)} formatted="false">{m.group(2)}</string>' if 'formatted=' not in m.group(1) else m.group(0),
-                                    raw_xml
-                                )
-                                fixed_xml = re.sub(
-                                    r'<item\s*([^>]*?)>([^<]*?%[^<]*?)</item>',
-                                    lambda m: f'<item {m.group(1)} formatted="false">{m.group(2)}</item>' if 'formatted=' not in m.group(1) else m.group(0),
-                                    fixed_xml
-                                )
-                            xml_stem = parts[3].replace(".xml", "")
-                            out_file = val_dir / f"{xml_stem}_{target}.xml"
-                            out_file.write_text(fixed_xml, encoding="utf-8")
+                                fixed_xml = re.sub(r'%(?![0-9]+\$[a-zA-Z%]|s|d|f|c|b|o|x|e|g|a|h)', '&#37;', raw_xml)
+                            except Exception:
+                                pass
+
+                            target_xml = val_dir / f"{target}_{parts[3]}"
+                            target_xml.write_text(fixed_xml, encoding="utf-8")
                     continue
 
-                # 5. Handle raw assets (e.g. actionbar/assets/animated_like_icon_dark_v4.json, waze skins)
-                if "assets" in parts and dest_assets_dir is not None:
-                    asset_idx = parts.index("assets")
-                    rel_asset_path = Path(*parts[asset_idx + 1:])
-                    out_asset = dest_assets_dir / rel_asset_path
-                    out_asset.parent.mkdir(parents=True, exist_ok=True)
-                    with open(out_asset, "wb") as out:
-                        out.write(z.read(name))
-                    continue
+                # -------------------------------------------------------------
+                # Handle root feature directories (e.g. settings/, swipecontrols/, waze/assets/)
+                # -------------------------------------------------------------
+                if len(parts) >= 2:
+                    # Check if entry is routed to assets
+                    if "assets/" in name and dest_assets_dir:
+                        assets_sub = name[name.index("assets/") + len("assets/"):]
+                        out_asset_path = dest_assets_dir / assets_sub
+                        out_asset_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(out_asset_path, "wb") as f_out:
+                            f_out.write(z.read(name))
+                        continue
 
-                # 6. Handle standard & qualified Android resource directories (drawables, layouts, fonts, mipmaps, raw, anim, color, xml)
-                res_dir_idx = -1
-                for i, p in enumerate(parts[:-1]):
-                    if RES_DIR_PATTERN.match(p):
-                        res_dir_idx = i
-                        break
+                    # Otherwise, check if second segment is a standard Android resource qualifier
+                    res_segment = parts[1]
+                    if RES_DIR_PATTERN.match(res_segment):
+                        rel_path = Path(*parts[1:])
+                        out_file = dest_res_dir / rel_path
+                        out_file.parent.mkdir(parents=True, exist_ok=True)
+                        with open(out_file, "wb") as f_out:
+                            f_out.write(z.read(name))
+                    elif RES_DIR_PATTERN.match(first):
+                        out_file = dest_res_dir / name
+                        out_file.parent.mkdir(parents=True, exist_ok=True)
+                        with open(out_file, "wb") as f_out:
+                            f_out.write(z.read(name))
 
-                if res_dir_idx != -1:
-                    res_type_dir = parts[res_dir_idx]
-                    target_type_dir = dest_res_dir / res_type_dir
-                    target_type_dir.mkdir(parents=True, exist_ok=True)
-                    out_target_file = target_type_dir / Path(name).name
-                    with open(out_target_file, "wb") as out:
-                        out.write(z.read(name))
-
-            if host_ids:
-                val_dir = dest_res_dir / "values"
-                val_dir.mkdir(parents=True, exist_ok=True)
-                items = "\n".join(f'    <item type="id" name="{i}" />' for i in sorted(host_ids))
-                (val_dir / "host_ids.xml").write_text(
-                    f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n{items}\n</resources>\n',
-                    encoding="utf-8"
-                )
+        # Synthesize declared host layout IDs into a public id declaration if needed
+        if host_ids:
+            values_dir = dest_res_dir / "values"
+            values_dir.mkdir(parents=True, exist_ok=True)
+            ids_xml_path = values_dir / "morphe_host_injected_ids.xml"
+            items = "\n".join(f'    <item type="id" name="{i}" />' for i in sorted(host_ids))
+            ids_xml = f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n{items}\n</resources>'
+            ids_xml_path.write_text(ids_xml, encoding="utf-8")
 
         return dest_res_dir
 
     @staticmethod
     def _extract_dex_classes(dex_bytes: bytes) -> List[str]:
-        if len(dex_bytes) < 0x70 or not dex_bytes[:4].startswith(b"dex\n"):
+        """
+        Pure Python DEX header & class_defs parser.
+        Extracts all class descriptors defined in classes.dex.
+        """
+        if len(dex_bytes) < 112:
             return []
 
-        string_ids_size, string_ids_off = struct.unpack_from("<II", dex_bytes, 0x38)
-        type_ids_size, type_ids_off = struct.unpack_from("<II", dex_bytes, 0x40)
-        class_defs_size, class_defs_off = struct.unpack_from("<II", dex_bytes, 0x60)
+        magic = dex_bytes[:4]
+        if magic != b"dex\n":
+            return []
 
-        string_offsets = [struct.unpack_from("<I", dex_bytes, string_ids_off + i * 4)[0] for i in range(string_ids_size)]
+        (
+            string_ids_size, string_ids_off,
+            type_ids_size, type_ids_off,
+            proto_ids_size, proto_ids_off,
+            field_ids_size, field_ids_off,
+            method_ids_size, method_ids_off,
+            class_defs_size, class_defs_off,
+        ) = struct.unpack_from("<12I", dex_bytes, 56)
 
         def get_string(idx: int) -> str:
-            if idx >= len(string_offsets):
+            if idx >= string_ids_size:
                 return ""
-            off = string_offsets[idx]
-            while dex_bytes[off] & 0x80:
-                off += 1
-            off += 1
-            end = dex_bytes.find(b"\x00", off)
-            return dex_bytes[off:end].decode("utf-8", errors="ignore")
+            str_off, = struct.unpack_from("<I", dex_bytes, string_ids_off + idx * 4)
+            pos = str_off
+            ulen = 0
+            shift = 0
+            while pos < len(dex_bytes):
+                b = dex_bytes[pos]
+                pos += 1
+                ulen |= (b & 0x7F) << shift
+                if not (b & 0x80):
+                    break
+                shift += 7
 
-        type_strings = [get_string(struct.unpack_from("<I", dex_bytes, type_ids_off + i * 4)[0]) for i in range(type_ids_size)]
+            end = dex_bytes.find(b"\x00", pos)
+            if end == -1:
+                end = len(dex_bytes)
+            return dex_bytes[pos:end].decode("utf-8", errors="ignore")
+
+        def get_type(idx: int) -> str:
+            if idx >= type_ids_size:
+                return ""
+            desc_idx, = struct.unpack_from("<I", dex_bytes, type_ids_off + idx * 4)
+            return get_string(desc_idx)
+
         classes = []
         for i in range(class_defs_size):
-            type_idx = struct.unpack_from("<I", dex_bytes, class_defs_off + i * 32)[0]
-            if type_idx < len(type_strings):
-                classes.append(type_strings[type_idx])
+            off = class_defs_off + i * 32
+            class_idx, = struct.unpack_from("<I", dex_bytes, off)
+            desc = get_type(class_idx)
+            if desc:
+                classes.append(desc)
 
         return classes
